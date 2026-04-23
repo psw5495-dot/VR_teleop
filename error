@@ -1,5 +1,5 @@
-Traceback (most recent call last):  File "<string>", line 12, in <module>
-  File "/opt/ros/humble/lib/python3.10/site-packages/pinocchio/__init__.py", line 19, in <module>
-    from .pinocchio_pywrap_default import *
-AttributeError: _ARRAY_API not found
-Segmentation fault (core dumped)
+cd ~/TeleVision
+source tv_env/bin/activate
+
+# 현재 numpy 버전 확인
+python -c "import numpy; print('NumPy 버전:', numpy.__version__)"
