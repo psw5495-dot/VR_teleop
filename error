@@ -1,17 +1,9 @@
-CMake Error at cmake/package-config.cmake:114 (find_package):
-  By not providing "Findeigenpy.cmake" in CMAKE_MODULE_PATH this project has
-  asked CMake to find a package configuration file provided by "eigenpy", but
-  CMake did not find one.
+# 현재 가상환경 비활성화
+deactivate
 
-  Could not find a package configuration file provided by "eigenpy"
-  (requested version 2.7.10) with any of the following names:
+# ROS 2 버전 설치 (최우선 추천)
+sudo apt update
+sudo apt install -y ros-humble-pinocchio ros-humble-eigenpy
 
-    eigenpyConfig.cmake
-    eigenpy-config.cmake
-
-  Add the installation prefix of "eigenpy" to CMAKE_PREFIX_PATH or set
-  "eigenpy_DIR" to a directory containing one of the above files.  If
-  "eigenpy" provides a separate development package or SDK, be sure it has
-  been installed.
-Call Stack (most recent call first):
-  CMakeLists.txt:419 (add_project_dependency)
+# 또는 시스템 Python 버전 (위 명령어 실패 시)
+sudo apt install -y python3-pinocchio python3-eigenpy libeigenpy-dev
