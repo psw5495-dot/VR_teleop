@@ -1,1 +1,26 @@
 
+# TeleVision 폴더에서 실행
+cd ~/TeleVision
+source /opt/ros/humble/setup.bash
+source tv_env/bin/activate
+export PYTHONPATH=$(pwd):$PYTHONPATH
+
+# 핵심 모듈 임포트 테스트
+python -c "
+import sys
+print('PYTHONPATH:', [p for p in sys.path if 'TeleVision' in p or 'ros' in p])
+
+try:
+    import rclpy
+    print('✅ ROS 2 연결 성공')
+except ImportError as e:
+    print('❌ ROS 2 연결 실패:', e)
+
+try:
+    import pinocchio
+    print('✅ Pinocchio 로드 성공')
+except ImportError as e:
+    print('❌ Pinocchio 로드 실패:', e)
+
+print('🚀 실행 준비 완료!')
+"
