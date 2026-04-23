@@ -1,419 +1,39 @@
-#!/usr/bin/env python3
-"""
-Quest 3 WebXR → ROS 2 텔레오퍼레이션 브릿지 서버
-Unity 라이선스 없이 VR 로봇 제어를 위한 완전한 솔루션
-"""
+document.getElementById('btn-vr').addEventListener('click', async () => {
+    log('🎯 VR 버튼 클릭 감지됨!', 'ok');
 
-import rclpy
-from rclpy.node import Node
-from geometry_msgs.msg import PoseStamped
-import asyncio
-from aiohttp import web
-import json
-import ssl
-import threading
-import argparse
-import time
-
-# --- ROS 2 노드 정의 ---
-class VRTeleopNode(Node):
-    def __init__(self):
-        super().__init__('vr_teleop_server')
-        
-        # Quest 3 오른손 포즈 토픽 발행
-        self.right_hand_pub = self.create_publisher(
-            PoseStamped, '/quest3/right_hand_pose', 10
-        )
-        
-        # 왼손도 필요하면 추가
-        self.left_hand_pub = self.create_publisher(
-            PoseStamped, '/quest3/left_hand_pose', 10
-        )
-        
-        self.get_logger().info("✅ VR Teleoperation ROS 2 노드 시작")
-        self.get_logger().info("📡 토픽: /quest3/right_hand_pose, /quest3/left_hand_pose")
-        
-        # 통계
-        self.msg_count = 0
-        self.start_time = time.time()
-        
-    def publish_hand_pose(self, hand, x, y, z, qx, qy, qz, qw):
-        """핸드 포즈를 ROS 2 토픽으로 발행"""
-        msg = PoseStamped()
-        msg.header.stamp = self.get_clock().now().to_msg()
-        msg.header.frame_id = 'quest3_world'
-        
-        msg.pose.position.x = float(x)
-        msg.pose.position.y = float(y)
-        msg.pose.position.z = float(z)
-        
-        msg.pose.orientation.x = float(qx)
-        msg.pose.orientation.y = float(qy)
-        msg.pose.orientation.z = float(qz)
-        msg.pose.orientation.w = float(qw)
-        
-        if hand == 'right':
-            self.right_hand_pub.publish(msg)
-        elif hand == 'left':
-            self.left_hand_pub.publish(msg)
-            
-        self.msg_count += 1
-        
-        # 5초마다 통계 출력
-        if self.msg_count % 150 == 0:  # 30Hz 기준
-            elapsed = time.time() - self.start_time
-            rate = self.msg_count / elapsed
-            self.get_logger().info(f"📊 메시지: {self.msg_count}개, 평균 {rate:.1f}Hz")
-
-# 전역 ROS 노드
-vr_node = None
-
-# --- ROS 2 스핀 스레드 ---
-def ros_spin():
-    """ROS 2 노드를 별도 스레드에서 실행"""
-    rclpy.init()
-    global vr_node
-    vr_node = VRTeleopNode()
-    try:
-        rclpy.spin(vr_node)
-    except KeyboardInterrupt:
-        pass
-    finally:
-        vr_node.destroy_node()
-        rclpy.shutdown()
-
-# --- WebSocket 핸들러 (VR 데이터 수신) ---
-async def websocket_handler(request):
-    """Quest 3에서 오는 WebSocket 연결 처리"""
-    ws = web.WebSocketResponse()
-    await ws.prepare(request)
-    
-    client_ip = request.remote
-    print(f"📱 Quest 3 연결됨: {client_ip}")
-    
-    try:
-        async for msg in ws:
-            if msg.type == web.WSMsgType.TEXT:
-                try:
-                    data = json.loads(msg.data)
-                    
-                    if vr_node and 'hand' in data:
-                        vr_node.publish_hand_pose(
-                            data['hand'],  # 'right' 또는 'left'
-                            data['x'], data['y'], data['z'],
-                            data['qx'], data['qy'], data['qz'], data['qw']
-                        )
-                        
-                except json.JSONDecodeError as e:
-                    print(f"⚠️  JSON 파싱 에러: {e}")
-                except KeyError as e:
-                    print(f"⚠️  필수 키 누락: {e}")
-                except Exception as e:
-                    print(f"❌ 데이터 처리 에러: {e}")
-                    
-            elif msg.type == web.WSMsgType.ERROR:
-                print(f"❌ WebSocket 에러: {ws.exception()}")
-                break
-                
-    except Exception as e:
-        print(f"❌ WebSocket 연결 에러: {e}")
-    finally:
-        print(f"📱 Quest 3 연결 해제: {client_ip}")
-        
-    return ws
-
-# --- WebXR HTML 프론트엔드 ---
-async def index_handler(request):
-    """진단 기능이 강화된 WebXR 클라이언트"""
-    html = """
-<!DOCTYPE html>
-<html>
-<head>
-    <title>G1 VR Teleoperation - 진단 모드</title>
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
-    <style>
-        * { box-sizing: border-box; margin: 0; padding: 0; }
-        body {
-            background: linear-gradient(135deg, #1e3c72, #2a5298);
-            color: white; font-family: 'Segoe UI', sans-serif;
-            padding: 15px; min-height: 100vh;
-        }
-        
-        h1 { 
-            text-align: center; font-size: 1.8em; margin-bottom: 20px;
-            text-shadow: 2px 2px 4px rgba(0,0,0,0.3);
-        }
-        
-        /* 실시간 로그 박스 */
-        #log-container {
-            background: rgba(0,0,0,0.8); border-radius: 12px;
-            padding: 15px; margin-bottom: 20px;
-            border: 1px solid #333;
-        }
-        
-        #log {
-            font-family: 'Courier New', monospace; font-size: 13px;
-            height: 200px; overflow-y: auto;
-            background: #000; padding: 10px; border-radius: 8px;
-            border: 1px solid #444;
-        }
-        
-        .log-ok   { color: #4CAF50; }
-        .log-err  { color: #ff4444; }
-        .log-warn { color: #ffaa00; }
-        .log-info { color: #4fc3f7; }
-        
-        /* 상태 표시 */
-        #status {
-            text-align: center; padding: 15px; border-radius: 10px;
-            margin-bottom: 15px; font-size: 16px; font-weight: bold;
-            background: rgba(255,255,255,0.1);
-        }
-        
-        /* 버튼 스타일 */
-        .btn {
-            width: 100%; padding: 15px; margin-bottom: 10px;
-            font-size: 16px; font-weight: bold; border: none;
-            border-radius: 10px; cursor: pointer;
-            transition: all 0.2s ease;
-        }
-        
-        .btn:active { transform: scale(0.95); }
-        
-        #btn-check { background: #2196F3; color: white; }
-        #btn-vr    { background: #4CAF50; color: white; }
-        #btn-inline{ background: #9C27B0; color: white; }
-        #btn-ws    { background: #FF5722; color: white; }
-        
-        .btn:disabled {
-            background: #666; cursor: not-allowed;
-            opacity: 0.6;
-        }
-    </style>
-</head>
-<body>
-    <h1>🤖 G1 VR Teleoperation - 진단 모드</h1>
-    
-    <!-- 상태 표시 -->
-    <div id="status">🔄 시스템 초기화 중...</div>
-    
-    <!-- 실시간 로그 -->
-    <div id="log-container">
-        <h3>📊 실시간 진단 로그:</h3>
-        <div id="log"></div>
-    </div>
-    
-    <!-- 진단 및 실행 버튼들 -->
-    <button class="btn" id="btn-check">🔍 1단계: WebXR 지원 여부 전체 검사</button>
-    <button class="btn" id="btn-vr">🥽 2단계: VR 모드 시작 (immersive-vr)</button>
-    <button class="btn" id="btn-inline">📱 3단계: 인라인 모드 테스트 (fallback)</button>
-    <button class="btn" id="btn-ws">📡 WebSocket 재연결</button>
-
-<script>
-// ==========================================
-// 로그 시스템
-// ==========================================
-const logDiv = document.getElementById('log');
-const statusDiv = document.getElementById('status');
-
-function log(message, type = 'info') {
-    const timestamp = new Date().toLocaleTimeString();
-    const logLine = document.createElement('div');
-    logLine.className = `log-${type}`;
-    logLine.textContent = `[${timestamp}] ${message}`;
-    logDiv.appendChild(logLine);
-    logDiv.scrollTop = logDiv.scrollHeight;
-    console.log(`[${type.toUpperCase()}] ${message}`);
-}
-
-log('🚀 진단 시스템 시작', 'ok');
-log(`브라우저: ${navigator.userAgent.substring(0, 80)}`, 'info');
-log(`현재 주소: ${window.location.href}`, 'info');
-
-// ==========================================
-// WebSocket 연결
-// ==========================================
-let ws = null;
-
-function connectWebSocket() {
-    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-    const wsUrl = `${protocol}//${window.location.host}/ws`;
-    
-    log(`WebSocket 연결 시도: ${wsUrl}`, 'info');
-    
-    try {
-        ws = new WebSocket(wsUrl);
-        
-        ws.onopen = () => {
-            log('✅ WebSocket 연결 성공!', 'ok');
-            statusDiv.textContent = '✅ 서버 연결 완료 - 1단계 검사를 시작하세요';
-            statusDiv.style.background = 'rgba(76, 175, 80, 0.3)';
-        };
-        
-        ws.onclose = (event) => {
-            log(`❌ WebSocket 연결 끊김 (code: ${event.code})`, 'err');
-            statusDiv.textContent = '❌ 서버 연결 실패 - 서버를 확인하세요';
-            statusDiv.style.background = 'rgba(244, 67, 54, 0.3)';
-        };
-        
-        ws.onerror = () => {
-            log('❌ WebSocket 에러 발생', 'err');
-        };
-        
-    } catch (error) {
-        log(`❌ WebSocket 생성 실패: ${error.message}`, 'err');
-    }
-}
-
-// WebSocket 초기 연결
-connectWebSocket();
-
-// ==========================================
-// 1단계: WebXR 완전 진단
-// ==========================================
-document.getElementById('btn-check').addEventListener('click', async () => {
-    log('=== WebXR 완전 진단 시작 ===', 'info');
-    
-    // HTTPS 체크 (가장 중요!)
-    const isHttps = window.location.protocol === 'https:';
-    log(`${isHttps ? '✅' : '❌'} HTTPS 프로토콜: ${window.location.protocol}`, isHttps ? 'ok' : 'err');
-    
-    if (!isHttps) {
-        log('🔴 치명적 오류: HTTP 접속 감지!', 'err');
-        log('→ 반드시 https://IP:8443 으로 접속하세요', 'err');
-        statusDiv.textContent = '❌ HTTP 접속 - HTTPS 필수!';
-        statusDiv.style.background = 'rgba(244, 67, 54, 0.5)';
-        return;
-    }
-    
-    // navigator.xr 존재 확인
-    if (!('xr' in navigator)) {
-        log('❌ navigator.xr 없음 - WebXR 미지원 브라우저', 'err');
-        log('→ Meta Quest 내장 "브라우저" 앱을 사용하세요', 'warn');
-        log('→ 개발자 모드가 활성화되어 있는지 확인하세요', 'warn');
-        statusDiv.textContent = '❌ WebXR 미지원 브라우저';
-        return;
-    }
-    log('✅ navigator.xr 존재 확인', 'ok');
-    
-    // immersive-vr 지원 확인
-    try {
-        const vrSupported = await navigator.xr.isSessionSupported('immersive-vr');
-        log(`${vrSupported ? '✅' : '❌'} immersive-vr 지원: ${vrSupported}`, vrSupported ? 'ok' : 'err');
-        
-        if (!vrSupported) {
-            log('→ Quest 개발자 모드 확인 필요', 'warn');
-            log('→ Quest 설정 > 시스템 > 개발자 > USB 디버깅 활성화', 'warn');
-        }
-    } catch (error) {
-        log(`❌ immersive-vr 확인 실패: ${error.message}`, 'err');
-    }
-    
-    // inline 모드 확인 (fallback)
-    try {
-        const inlineSupported = await navigator.xr.isSessionSupported('inline');
-        log(`${inlineSupported ? '✅' : '❌'} inline 모드 지원: ${inlineSupported}`, inlineSupported ? 'ok' : 'warn');
-    } catch (error) {
-        log(`❌ inline 모드 확인 실패: ${error.message}`, 'err');
-    }
-    
-    // WebSocket 상태 확인
-    const wsStatus = ws ? ['연결중', '연결됨', '종료중', '종료됨'][ws.readyState] : '없음';
-    const wsOk = ws && ws.readyState === WebSocket.OPEN;
-    log(`${wsOk ? '✅' : '❌'} WebSocket 상태: ${wsStatus}`, wsOk ? 'ok' : 'err');
-    
-    // 종합 판정
-    log('=== 진단 완료 ===', 'info');
-    const allGood = isHttps && ('xr' in navigator) && wsOk;
-    
-    if (allGood) {
-        log('🎉 모든 기본 요구사항 충족! 2단계 VR 시작을 시도하세요', 'ok');
-        statusDiv.textContent = '✅ 진단 통과 - VR 시작 가능';
-        statusDiv.style.background = 'rgba(76, 175, 80, 0.4)';
-    } else {
-        log('⚠️ 문제 발견 - 위 에러들을 먼저 해결하세요', 'warn');
-        statusDiv.textContent = '⚠️ 문제 발견 - 로그 확인 필요';
-        statusDiv.style.background = 'rgba(255, 152, 0, 0.4)';
-    }
-});
-
-// ==========================================
-// Three.js 렌더러 초기화
-// ==========================================
-const scene = new THREE.Scene();
-const camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 100);
-const renderer = new THREE.WebGLRenderer({ antialias: true });
-
-renderer.setSize(window.innerWidth, window.innerHeight);
-renderer.xr.enabled = true;
-renderer.setClearColor(0x1a1a2e);
-renderer.domElement.style.display = 'none';
-document.body.appendChild(renderer.domElement);
-
-// 씬 구성
-const gridHelper = new THREE.GridHelper(10, 10, 0x888888, 0x444444);
-scene.add(gridHelper);
-
-const ambientLight = new THREE.AmbientLight(0x404040, 0.6);
-const directionalLight = new THREE.DirectionalLight(0xffffff, 0.8);
-directionalLight.position.set(2, 4, 2);
-scene.add(ambientLight);
-scene.add(directionalLight);
-
-// 컨트롤러 설정
-const rightController = renderer.xr.getController(0);
-const leftController = renderer.xr.getController(1);
-
-// 컨트롤러 시각화
-const rightBox = new THREE.Mesh(
-    new THREE.BoxGeometry(0.05, 0.05, 0.15),
-    new THREE.MeshStandardMaterial({ color: 0x00ff00 })
-);
-const leftBox = new THREE.Mesh(
-    new THREE.BoxGeometry(0.05, 0.05, 0.15),
-    new THREE.MeshStandardMaterial({ color: 0x0088ff })
-);
-
-rightController.add(rightBox);
-leftController.add(leftBox);
-scene.add(rightController);
-scene.add(leftController);
-
-// ==========================================
-// XR 세션 시작 공통 함수
-// ==========================================
-async function startXRSession(mode) {
-    log(`🎯 XR 세션 시작 시도: ${mode}`, 'info');
-    
     if (!navigator.xr) {
-        log('❌ navigator.xr 없음! 먼저 1단계 검사를 실행하세요', 'err');
+        log('❌ navigator.xr 없음 - WebXR 미지원', 'err');
         return;
     }
-    
+
     try {
-        // 세션 옵션 (Quest Guardian 문제 방지)
-        const sessionInit = {
-            optionalFeatures: ['local-floor']  // bounded-floor 제거로 Guardian 문제 방지
-        };
-        
-        log('세션 요청 전송 중...', 'info');
-        const session = await navigator.xr.requestSession(mode, sessionInit);
-        log('✅ XR 세션 생성 성공!', 'ok');
-        
-        // 렌더러에 세션 연결
+        // 지원 여부 재확인
+        const supported = await navigator.xr.isSessionSupported('immersive-vr');
+        log(`immersive-vr 지원: ${supported}`, supported ? 'ok' : 'err');
+
+        if (!supported) {
+            log('💡 immersive-vr 미지원 - Guardian 설정 확인 필요', 'warn');
+            return;
+        }
+
+        log('VR 세션 시작 시도 중...', 'info');
+
+        // 세션 시작 (호환성 향상을 위해 minimal options)
+        const session = await navigator.xr.requestSession('immersive-vr', {
+            optionalFeatures: ['local-floor']
+        });
+
+        log('✅ VR 세션 생성 성공!', 'ok');
         await renderer.xr.setSession(session);
-        log('✅ 렌더러 연결 완료!', 'ok');
-        
-        // UI 전환
+        log('✅ 렌더러 연결 완료 - VR 모드 진입!', 'ok');
+
+        // UI 숨기기
         document.querySelector('h1').style.display = 'none';
         document.getElementById('log-container').style.display = 'none';
         statusDiv.style.display = 'none';
         document.querySelectorAll('.btn').forEach(btn => btn.style.display = 'none');
         renderer.domElement.style.display = 'block';
-        
-        log('🥽 VR 모드 진입 완료! 오른손 컨트롤러를 움직여보세요', 'ok');
-        
+
         // 세션 종료 이벤트
         session.addEventListener('end', () => {
             log('VR 세션 종료됨', 'warn');
@@ -423,147 +43,25 @@ async function startXRSession(mode) {
             statusDiv.style.display = 'block';
             document.querySelectorAll('.btn').forEach(btn => btn.style.display = 'block');
             renderer.domElement.style.display = 'none';
-            
-            statusDiv.textContent = 'VR 세션 종료됨 - 다시 시작하려면 버튼 클릭';
+            statusDiv.textContent = 'VR 세션 종료됨';
             statusDiv.style.background = 'rgba(255, 152, 0, 0.3)';
         });
-        
-    } catch (error) {
-        log(`❌ XR 세션 실패: ${error.name}: ${error.message}`, 'err');
-        
-        // 구체적인 에러별 해결책
-        switch (error.name) {
-            case 'NotSupportedError':
-                log('→ immersive-vr 미지원. 3단계 inline 모드를 시도하세요', 'warn');
-                break;
-            case 'SecurityError':
-                log('→ 보안 오류. HTTPS 주소 재확인 필요', 'warn');
-                break;
-            case 'NotAllowedError':
-                log('→ 사용자 권한 거부. Quest에서 VR 권한을 허용하세요', 'warn');
-                break;
-            case 'InvalidStateError':
-                log('→ 이미 XR 세션이 실행 중입니다', 'warn');
-                break;
-            default:
-                log('→ Quest 가디언(안전 경계) 설정을 확인하세요', 'warn');
-                log('→ Quest를 재부팅 후 다시 시도해보세요', 'warn');
-        }
-        
-        statusDiv.textContent = `❌ VR 시작 실패: ${error.name}`;
-        statusDiv.style.background = 'rgba(244, 67, 54, 0.4)';
-    }
-}
 
-// ==========================================
-// 버튼 이벤트 연결
-// ==========================================
-document.getElementById('btn-vr').addEventListener('click', async () => {
-    log('🎯 VR 버튼 클릭 감지됨!', 'ok');
-    
-    // Guardian 상태 간접 확인
-    if (!navigator.xr) {
-        log('❌ navigator.xr 없음 - WebXR 미지원', 'err');
-        return;
-    }
-    
-    try {
-        // 지원 여부 재확인
-        const supported = await navigator.xr.isSessionSupported('immersive-vr');
-        log(`immersive-vr 지원: ${supported}`, supported ? 'ok' : 'err');
-        
-        if (!supported) {
-            log('💡 Guardian 설정이 안 되어 있을 가능성이 높습니다', 'warn');
-            return;
-        }
-        
-        // 최소 옵션으로 세션 시작 시도
-        log('VR 세션 시작 시도 중...', 'info');
-        const session = await navigator.xr.requestSession('immersive-vr');
-        
-        log('✅ VR 세션 생성 성공!', 'ok');
-        await renderer.xr.setSession(session);
-        log('✅ 렌더러 연결 완료 - VR 모드 진입!', 'ok');
-        
-        // UI 숨기기
-        document.getElementById('container').style.display = 'none';
-        renderer.domElement.style.display = 'block';
-        
     } catch (error) {
         log(`❌ VR 세션 실패: ${error.name}`, 'err');
         log(`상세 메시지: ${error.message}`, 'err');
-        
-        // 에러별 구체적 해결책
+
         const solutions = {
             'NotAllowedError': '🔧 Guardian 설정 또는 VR 권한 허용 필요',
-            'NotSupportedError': '🔧 개발자 모드 활성화 또는 Guardian 설정 필요',
-            'SecurityError': '🔧 HTTPS 주소 확인 (https://로 시작하는지)',
+            'NotSupportedError': '🔧 개발자 모드 활성화 필요',
+            'SecurityError': '🔧 HTTPS 주소 확인 필요',
             'InvalidStateError': '🔧 Quest 브라우저 완전 재시작 필요'
         };
-        
+
         const solution = solutions[error.name] || '🔧 Quest 재부팅 후 재시도';
         log(solution, 'warn');
+
+        statusDiv.textContent = `❌ VR 시작 실패: ${error.name}`;
+        statusDiv.style.background = 'rgba(244, 67, 54, 0.4)';
     }
 });
-
-// 초기화 완료
-log('🎯 초기화 완료! 1단계 검사부터 시작하세요', 'ok');
-statusDiv.textContent = '✅ 준비 완료 - 1단계 검사를 시작하세요';
-
-</script>
-</body>
-</html>
-    """
-    return web.Response(text=html, content_type='text/html')
-
-# --- 상태 확인 API ---
-async def status_handler(request):
-    """시스템 상태 확인 API"""
-    status = {
-        'server': 'running',
-        'ros_node': vr_node is not None,
-        'message_count': vr_node.msg_count if vr_node else 0,
-        'uptime': time.time() - (vr_node.start_time if vr_node else time.time())
-    }
-    return web.json_response(status)
-
-# --- 메인 실행 함수 ---
-def main():
-    parser = argparse.ArgumentParser(description='Quest 3 WebXR → ROS 2 텔레오퍼레이션 서버')
-    parser.add_argument('--port', type=int, default=8443, help='HTTPS 포트 (기본: 8443)')
-    parser.add_argument('--ssl-cert', required=True, help='SSL 인증서 파일 경로')
-    parser.add_argument('--ssl-key', required=True, help='SSL 키 파일 경로')
-    args = parser.parse_args()
-
-    print("🚀 G1 VR Teleoperation 서버 시작 중...")
-    
-    # ROS 2 노드를 백그라운드 스레드에서 실행
-    ros_thread = threading.Thread(target=ros_spin, daemon=True)
-    ros_thread.start()
-    
-    # 잠깐 대기 (ROS 노드 초기화)
-    time.sleep(2)
-
-    # aiohttp 웹 서버 설정
-    app = web.Application()
-    app.router.add_get('/', index_handler)
-    app.router.add_get('/ws', websocket_handler)
-    app.router.add_get('/status', status_handler)
-
-    # SSL 컨텍스트 설정 (WebXR은 HTTPS 필수)
-    ssl_context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
-    ssl_context.load_cert_chain(args.ssl_cert, args.ssl_key)
-
-    print(f"🌐 WebXR 서버 준비 완료!")
-    print(f"📱 Quest 3 접속 주소: https://0.0.0.0:{args.port}")
-    print(f"📊 상태 확인: https://0.0.0.0:{args.port}/status")
-    print(f"🛑 종료하려면 Ctrl+C")
-    
-    try:
-        web.run_app(app, port=args.port, ssl_context=ssl_context, print=None)
-    except KeyboardInterrupt:
-        print("\n🛑 서버 종료 중...")
-
-if __name__ == '__main__':
-    main()
-
