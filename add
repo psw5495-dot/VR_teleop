@@ -23,4 +23,22 @@ except ImportError as e:
     print('❌ Pinocchio 로드 실패:', e)
 
 print('🚀 실행 준비 완료!')
-"
+
+
+
+
+# 방법 1: pip 직접 설치 (가장 간단)
+pip install pin
+
+# 방법 2: 시스템 패키지 활용 (추천)
+sudo apt install python3-pinocchio
+# 또는 ROS 2 버전
+sudo apt install ros-humble-pinocchio
+
+# 방법 3: 소스 빌드 (최후 수단)
+sudo apt install libeigen3-dev libboost-all-dev cmake
+git clone --recursive https://github.com/stack-of-tasks/pinocchio.git
+cd pinocchio && mkdir build && cd build
+cmake .. -DCMAKE_BUILD_TYPE=Release -DPYTHON_EXECUTABLE=$(which python3)
+make -j4 && sudo make install
+
