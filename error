@@ -1,9 +1,7 @@
-# 환경 변수 확인
-echo "ROS_DISTRO: $ROS_DISTRO"
-echo "현재 Python: $(which python)"
+# 시스템 Python에서 rclpy 테스트
+source /opt/ros/humble/setup.bash
+python3 -c "import rclpy; print('시스템 rclpy: 성공')"
 
-# ROS 2 설치 확인
-ls /opt/ros/ | grep humble
-
-# 가상환경 설정 확인
-cat ~/TeleVision/tv_env/pyvenv.cfg | grep system-site
+# 가상환경에서 테스트
+source ~/TeleVision/tv_env/bin/activate
+python -c "import rclpy; print('가상환경 rclpy: 성공')" 2>&1
