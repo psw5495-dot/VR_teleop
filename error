@@ -1,17 +1,5 @@
-cd ~/TeleVision
-
-# ROS 2 환경 로드
-source /opt/ros/humble/setup.bash
-
-# 기존 tv_env 삭제
-rm -rf tv_env
-
-# 시스템 python3 기반 venv 생성
-/usr/bin/python3 -m venv --system-site-packages tv_env
-
-# venv 활성화
-source tv_env/bin/activate
-
-# pip 최신화 및 필요 패키지 설치
-pip install --upgrade pip
-pip install -r requirements.txt
+Traceback (most recent call last):  File "<string>", line 12, in <module>
+  File "/opt/ros/humble/lib/python3.10/site-packages/pinocchio/__init__.py", line 19, in <module>
+    from .pinocchio_pywrap_default import *
+AttributeError: _ARRAY_API not found
+Segmentation fault (core dumped)
