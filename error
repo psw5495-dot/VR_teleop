@@ -1,3 +1,18 @@
-ERROR: pip's dependency resolver does not currently take into account all the packages that are installed. This behaviour is the source of the following dependency conflicts.
-pandas 2.3.0 requires python-dateutil>=2.8.2, but you have python-dateutil 2.8.1 which is incompatible.
-opencv-python 4.12.0.88 requires numpy<2.3.0,>=2; python_version >= "3.9", but you have numpy 1.26.4 which is incompatible.
+# 모든 환경 변수 설정
+source /opt/ros/humble/setup.bash
+export LD_PRELOAD=/usr/lib/x86_64-linux-gnu/libstdc++.so.6
+export PYTHONPATH=/opt/ros/humble/local/lib/python3.10/dist-packages:/opt/ros/humble/lib/python3.10/site-packages:$(pwd):$PYTHONPATH
+
+# 통합 테스트
+python -c "
+import numpy
+print(f'✅ NumPy 버전: {numpy.__version__}')
+
+import pinocchio
+print('✅ Pinocchio 로드 성공!')
+
+import rclpy
+print('✅ ROS 2 연결 성공!')
+
+print('🚀 모든 패키지 정상 작동!')
+"
