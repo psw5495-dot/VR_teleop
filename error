@@ -1,9 +1,6 @@
-# 현재 가상환경 비활성화
-deactivate
+# 가상환경 활성화 후 PYTHONPATH 추가
+export PYTHONPATH=/opt/ros/humble/lib/python3.10/site-packages:$PYTHONPATH
 
-# ROS 2 버전 설치 (최우선 추천)
-sudo apt update
-sudo apt install -y ros-humble-pinocchio ros-humble-eigenpy
-
-# 또는 시스템 Python 버전 (위 명령어 실패 시)
-sudo apt install -y python3-pinocchio python3-eigenpy libeigenpy-dev
+# 확인
+python -c "import rclpy; print('ROS 2 연결 성공!')"
+python -c "import pinocchio; print('Pinocchio 설치 성공!')"
