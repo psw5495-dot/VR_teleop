@@ -1,4 +1,35 @@
-openssl req -x509 -newkey rsa:4096 \
-  -keyout key.pem -out cert.pem \
-  -days 365 -nodes \
-  -subj "/CN=192.168.1.100"
+#!/bin/bash
+# ~/start_teleop.sh
+
+set -e  # 에러 시 중단
+
+echo "=== Open-TeleVision 시작 ==="
+
+# 프로젝트 디렉토리로 이동
+cd ~/TeleVision  # 실제 경로로 수정
+
+# ROS 2 환경 로드
+echo "ROS 2 환경 로딩..."
+source /opt/ros/humble/setup.bash
+source ~/ros2_ws/install/setup.bash
+
+# 가상환경 활성화
+echo "Python 가상환경 활성화..."
+source tv_env/bin/activate
+
+# ROS Python 경로 보장
+export PYTHONPATH=/opt/ros/humble/lib/python3.10/site-packages:$PYTHONPATH
+
+# 환경 확인
+echo "✅ 환경 준비 완료"
+echo "   Python: $(which python)"
+echo "   ROS: $ROS_DISTRO"
+
+# 서버 실행
+echo "🚀 WebXR 서버 시작..."
+echo "📱 Quest 3에서 접속: https://$(hostname -I | awk '{print $1}'):8443"
+
+python teleop/serve_webxr.py \
+    --port 8443 \
+    --ssl-cert cert.pem \
+    --ssl-key key.pem
