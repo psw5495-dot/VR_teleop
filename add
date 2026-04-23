@@ -22,7 +22,7 @@ try:
 except ImportError as e:
     print('❌ Pinocchio 로드 실패:', e)
 
-print('🚀 실행 준비 완료!')
+print('🚀 실행 준비 완료!')"
 
 
 
