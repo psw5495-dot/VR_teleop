@@ -1,5 +1,8 @@
-cd ~/TeleVision
-source tv_env/bin/activate
+# 기존 numpy 제거
+pip uninstall -y numpy
 
-# 현재 numpy 버전 확인
-python -c "import numpy; print('NumPy 버전:', numpy.__version__)"
+# ROS 2 Humble 호환 numpy 1.x 설치
+pip install "numpy>=1.21.0,<2.0.0"
+
+# scipy도 호환 버전으로 설치 (선택사항)
+pip install "scipy>=1.7.0,<1.11.0"
