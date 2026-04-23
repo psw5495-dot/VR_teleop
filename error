@@ -1,8 +1,17 @@
-# conda 환경 완전히 빠져나오기 (여러 번 반복해도 안전)
-conda deactivate 2>/dev/null || true
-conda deactivate 2>/dev/null || true
+cd ~/TeleVision
 
-# PATH에서 miniconda 제거
-export PATH=$(echo "$PATH" | tr ':' '\n' | grep -v "miniconda3" | paste -sd ':' -)
-# LD_LIBRARY_PATH에서도 miniconda 제거
-export LD_LIBRARY_PATH=$(echo "$LD_LIBRARY_PATH" | tr ':' '\n' | grep -v "miniconda3" | paste -sd ':' -)
+# ROS 2 환경 로드
+source /opt/ros/humble/setup.bash
+
+# 기존 tv_env 삭제
+rm -rf tv_env
+
+# 시스템 python3 기반 venv 생성
+/usr/bin/python3 -m venv --system-site-packages tv_env
+
+# venv 활성화
+source tv_env/bin/activate
+
+# pip 최신화 및 필요 패키지 설치
+pip install --upgrade pip
+pip install -r requirements.txt
