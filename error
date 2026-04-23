@@ -1,6 +1,15 @@
-# 가상환경 활성화 후 PYTHONPATH 추가
-export PYTHONPATH=/opt/ros/humble/lib/python3.10/site-packages:$PYTHONPATH
+# TeleVision 폴더에서 실행
+cd ~/TeleVision
 
-# 확인
-python -c "import rclpy; print('ROS 2 연결 성공!')"
-python -c "import pinocchio; print('Pinocchio 설치 성공!')"
+# 1. ROS 2 환경 먼저 로드 (순서 중요!)
+source /opt/ros/humble/setup.bash
+
+# 2. 가상환경 활성화
+source tv_env/bin/activate
+
+# 3. 🎯 핵심: Ubuntu 22.04 Humble의 정확한 두 경로 모두 추가
+export PYTHONPATH=/opt/ros/humble/local/lib/python3.10/dist-packages:/opt/ros/humble/lib/python3.10/site-packages:$(pwd):$PYTHONPATH
+
+# 4. 연결 테스트
+python -c "import rclpy; print('✅ ROS 2 연결 성공!')"
+
