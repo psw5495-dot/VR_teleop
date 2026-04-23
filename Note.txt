@@ -1,14 +1,119 @@
-# 기존에 만든 스크립트 사용
-~/start_teleop_final_fixed.sh
+#!/usr/bin/env python3
+from aiohttp import web
 
-# 또는 수동 실행
-cd ~/TeleVision
-source /opt/ros/humble/setup.bash
-source tv_env/bin/activate
-export LD_PRELOAD=/usr/lib/x86_64-linux-gnu/libstdc++.so.6
-export PYTHONPATH=/opt/ros/humble/local/lib/python3.10/dist-packages:/opt/ros/humble/lib/python3.10/site-packages:$(pwd):$PYTHONPATH
+async def test_handler(request):
+    html = """
+<!DOCTYPE html>
+<html>
+<head>
+    <title>클릭 테스트</title>
+    <style>
+        body { 
+            background: #1a1a2e; color: white; 
+            display: flex; flex-direction: column;
+            align-items: center; justify-content: center;
+            height: 100vh; font-size: 20px; font-family: Arial;
+        }
+        button {
+            font-size: 36px; padding: 25px 50px;
+            background: #4CAF50; color: white;
+            border: none; border-radius: 15px;
+            cursor: pointer; margin: 15px;
+            /* Quest 3 터치 최적화 */
+            -webkit-tap-highlight-color: rgba(0,0,0,0);
+            touch-action: manipulation;
+            user-select: none;
+        }
+        #log { 
+            margin-top: 25px; padding: 15px;
+            background: #000; border-radius: 10px;
+            width: 90%; min-height: 150px;
+            font-family: monospace; font-size: 16px;
+            overflow-y: auto;
+        }
+    </style>
+</head>
+<body>
+    <h2>🔍 Quest 3 클릭 진단</h2>
+    
+    <button id="btn1" 
+            onclick="addLog('✅ onclick 이벤트 작동!')"
+            ontouchend="addLog('✅ touchend 이벤트 작동!')">
+        👆 이 버튼을 클릭하세요
+    </button>
+    
+    <button onclick="testWebXR()">
+        🥽 WebXR 기본 테스트
+    </button>
+    
+    <div id="log">진단 대기 중...</div>
 
-python teleop/serve_webxr.py \
-    --port 8443 \
-    --ssl-cert cert.pem \
-    --ssl-key key.pem
+    <script>
+        var count = 0;
+        
+        function addLog(msg) {
+            count++;
+            var logDiv = document.getElementById('log');
+            var time = new Date().toLocaleTimeString();
+            logDiv.innerHTML = '[' + time + '] ' + msg + '<br>' + logDiv.innerHTML;
+            console.log(msg);
+        }
+        
+        // addEventListener 방식도 테스트
+        document.getElementById('btn1').addEventListener('click', function() {
+            addLog('✅ addEventListener 방식도 작동! (count: ' + count + ')');
+        });
+        
+        // WebXR 기본 테스트
+        async function testWebXR() {
+            addLog('=== WebXR 테스트 시작 ===');
+            
+            if (!navigator.xr) {
+                addLog('❌ navigator.xr 없음 - WebXR 미지원');
+                return;
+            }
+            addLog('✅ navigator.xr 존재');
+            
+            try {
+                var supported = await navigator.xr.isSessionSupported('immersive-vr');
+                addLog('immersive-vr 지원: ' + supported);
+                
+                if (supported) {
+                    addLog('VR 세션 시작 시도...');
+                    var session = await navigator.xr.requestSession('immersive-vr');
+                    addLog('🎉 VR 세션 생성 성공!');
+                    
+                    // 2초 후 종료
+                    setTimeout(function() {
+                        session.end();
+                        addLog('테스트 세션 종료');
+                    }, 2000);
+                }
+            } catch (error) {
+                addLog('❌ VR 세션 실패: ' + error.name);
+                addLog('메시지: ' + error.message);
+            }
+        }
+        
+        addLog('✅ 페이지 로드 완료 - 버튼을 눌러보세요');
+        addLog('프로토콜: ' + window.location.protocol);
+    </script>
+</body>
+</html>
+    """
+    return web.Response(text=html, content_type='text/html')
+
+def main():
+    app = web.Application()
+    app.router.add_get('/', test_handler)
+    print("테스트 서버 실행: https://[노트북IP]:8443")
+    
+    # 기존 SSL 인증서 사용
+    import ssl
+    ssl_context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    ssl_context.load_cert_chain('cert.pem', 'key.pem')
+    
+    web.run_app(app, port=8443, ssl_context=ssl_context)
+
+if __name__ == '__main__':
+    main()
