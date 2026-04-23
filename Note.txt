@@ -33,3 +33,9 @@ python teleop/serve_webxr.py \
     --port 8443 \
     --ssl-cert cert.pem \
     --ssl-key key.pem
+
+
+# 실행 권한 부여 후 사용
+chmod +x ~/start_teleop.sh
+~/start_teleop.sh
+
