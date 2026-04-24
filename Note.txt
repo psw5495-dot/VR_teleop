@@ -1,98 +1,5 @@
-from http.server import HTTPServer, SimpleHTTPRequestHandler
-import ssl
-import json
-
-from teleop_pipeline import (
-    TeleopConfig,
-    TeleopPipeline,
-    parse_frame_from_json,
-)
-
-HOST = "0.0.0.0"
-PORT = 8443
-
-# 기존 teleop pipeline 설정 (변경 없음)
-cfg = TeleopConfig(
-    pos_scale=0.5,
-    robot_home_pos=(0.35, -0.20, 0.45),
-    max_dx=0.10, max_dy=0.10, max_dz=0.10,
-    ema_alpha=0.15,
-    watchdog_timeout_s=0.3,
-    axis_sign=(1.0, -1.0, -1.0),
-)
-
-pipeline = TeleopPipeline(cfg)
-
-
-class Handler(SimpleHTTPRequestHandler):
-    
-    # ==========================================
-    # ⭐️ 새로 추가: GET 요청 처리 (WebXR HTML 반환)
-    # ==========================================
-    def do_GET(self):
-        if self.path == '/' or self.path == '/index.html':
-            html = self._get_webxr_html()
-            encoded = html.encode('utf-8')
-            self.send_response(200)
-            self.send_header('Content-Type', 'text/html; charset=utf-8')
-            self.send_header('Content-Length', str(len(encoded)))
-            self.end_headers()
-            self.wfile.write(encoded)
-        elif self.path == '/status':
-            # 서버 상태 확인 API
-            status = {"server": "running", "pipeline": "ready"}
-            response = json.dumps(status).encode('utf-8')
-            self.send_response(200)
-            self.send_header('Content-Type', 'application/json')
-            self.send_header('Content-Length', str(len(response)))
-            self.end_headers()
-            self.wfile.write(response)
-        else:
-            # 그 외 경로는 404
-            self.send_response(404)
-            self.end_headers()
-
-    # ==========================================
-    # 기존 POST 핸들러 (변경 없음)
-    # ==========================================
-    def do_POST(self):
-        if self.path == "/pose":
-            length = int(self.headers.get("Content-Length", "0"))
-            raw = self.rfile.read(length)
-
-            try:
-                data = json.loads(raw.decode("utf-8"))
-                frame = parse_frame_from_json(data)
-                result = pipeline.process(frame)
-
-                print("\n=== TELEOP RESULT ===")
-                print(json.dumps(result, indent=2, ensure_ascii=False))
-
-                response = json.dumps(result).encode("utf-8")
-                self.send_response(200)
-                self.send_header("Content-Type", "application/json")
-                self.send_header("Content-Length", str(len(response)))
-                self.send_header("Access-Control-Allow-Origin", "*")
-                self.end_headers()
-                self.wfile.write(response)
-
-            except Exception as e:
-                print("POST parse/process error:", e)
-                err = json.dumps({"ok": False, "error": str(e)}).encode("utf-8")
-                self.send_response(500)
-                self.send_header("Content-Type", "application/json")
-                self.send_header("Content-Length", str(len(err)))
-                self.end_headers()
-                self.wfile.write(err)
-        else:
-            self.send_response(404)
-            self.end_headers()
-
-    # ==========================================
-    # WebXR HTML (Quest 3 VR 앱)
-    # ==========================================
-    def _get_webxr_html(self):
-        return """<!DOCTYPE html>
+def _get_webxr_html(self):
+    return """<!DOCTYPE html>
 <html>
 <head>
     <title>G1 VR Teleoperation</title>
@@ -104,282 +11,260 @@ class Handler(SimpleHTTPRequestHandler):
             display: flex; flex-direction: column; align-items: center;
             justify-content: center; height: 100vh; margin: 0; text-align: center;
         }
-        h1 { 
-            font-size: 2.5em; margin-bottom: 30px; 
-            text-shadow: 2px 2px 4px rgba(0,0,0,0.5);
-        }
+        h1 { font-size: 2.2em; margin-bottom: 25px; text-shadow: 2px 2px 4px rgba(0,0,0,0.5); }
         button {
-            font-size: 20px; padding: 18px 35px; margin: 10px;
-            border-radius: 12px; border: none; cursor: pointer;
+            font-size: 18px; padding: 16px 32px; margin: 8px;
+            border-radius: 10px; border: none; cursor: pointer;
             font-weight: bold; transition: all 0.3s ease;
-            touch-action: manipulation;
+            touch-action: manipulation; width: 85%; max-width: 400px;
         }
         #btn-check { background: #2196F3; color: white; }
         #btn-vr { background: #4CAF50; color: white; }
-        #btn-reset { background: #FF9800; color: white; }
-        button:hover { transform: translateY(-2px); box-shadow: 0 8px 16px rgba(0,0,0,0.3); }
         #status {
-            margin: 20px 0; padding: 15px 25px; border-radius: 10px;
-            font-size: 16px; font-weight: bold;
-            background: rgba(255,255,255,0.1);
+            margin: 15px 0; padding: 12px 20px; border-radius: 8px;
+            font-size: 15px; font-weight: bold; background: rgba(255,255,255,0.1);
         }
         #log {
-            background: rgba(0,0,0,0.8); color: #00ff41;
-            padding: 15px; width: 90%; max-width: 600px; height: 200px;
-            overflow-y: auto; text-align: left; font-family: 'Courier New', monospace;
-            font-size: 13px; border-radius: 8px; margin-top: 20px;
-            border: 1px solid #333;
+            background: rgba(0,0,0,0.8); color: #00ff41; padding: 12px;
+            width: 90%; max-width: 500px; height: 180px; overflow-y: auto;
+            text-align: left; font-family: 'Courier New', monospace;
+            font-size: 13px; border-radius: 6px; margin-top: 15px; border: 1px solid #333;
         }
     </style>
 </head>
 <body>
     <h1>🤖 G1 VR Teleoperation</h1>
-    <div id="status">🔄 시스템 초기화 중...</div>
-
+    <div id="status">🔄 시스템 준비 중...</div>
+    
     <button id="btn-check" onclick="runCheck()">🔍 1단계: 환경 검사</button>
     <button id="btn-vr" onclick="startVR()">🥽 2단계: VR 시작</button>
-    <button id="btn-reset" onclick="resetOrigin()">🔄 기준점 재설정</button>
-
+    
     <div id="log">시스템 대기 중...<br></div>
 
 <script>
-    // ==========================================
-    // 로그 및 상태 관리
-    // ==========================================
-    function log(msg) {
-        const logDiv = document.getElementById('log');
-        const time = new Date().toLocaleTimeString();
-        logDiv.innerHTML += '[' + time + '] ' + msg + '<br>';
-        logDiv.scrollTop = logDiv.scrollHeight;
-        console.log(msg);
+// ==========================================
+// 로그 및 상태 관리
+// ==========================================
+function log(msg) {
+    const logDiv = document.getElementById('log');
+    const time = new Date().toLocaleTimeString();
+    logDiv.innerHTML += '[' + time + '] ' + msg + '<br>';
+    logDiv.scrollTop = logDiv.scrollHeight;
+    console.log(msg);
+}
+
+function setStatus(msg, color) {
+    const statusDiv = document.getElementById('status');
+    statusDiv.textContent = msg;
+    statusDiv.style.background = color || 'rgba(255,255,255,0.1)';
+}
+
+// ==========================================
+// 1단계: 환경 검사
+// ==========================================
+async function runCheck() {
+    log('=== 환경 검사 시작 ===');
+    
+    const isHttps = window.location.protocol === 'https:';
+    log((isHttps ? '✅' : '❌') + ' HTTPS: ' + window.location.protocol);
+    
+    if (!isHttps) {
+        setStatus('❌ HTTPS 필수!', 'rgba(244,67,54,0.4)');
+        return;
     }
 
-    function setStatus(msg, color) {
-        const statusDiv = document.getElementById('status');
-        statusDiv.textContent = msg;
-        statusDiv.style.background = color || 'rgba(255,255,255,0.1)';
+    if (!navigator.xr) {
+        log('❌ navigator.xr 없음 (WebXR 미지원)');
+        setStatus('❌ WebXR 미지원 브라우저', 'rgba(244,67,54,0.4)');
+        return;
+    }
+    log('✅ navigator.xr 확인됨');
+
+    try {
+        const supported = await navigator.xr.isSessionSupported('immersive-vr');
+        log((supported ? '✅' : '❌') + ' immersive-vr: ' + (supported ? '지원됨' : '미지원'));
+
+        if (supported) {
+            setStatus('✅ 모든 검사 통과 - VR 시작 가능!', 'rgba(76,175,80,0.4)');
+            log('🎉 2단계 VR 시작을 눌러주세요!');
+        } else {
+            setStatus('❌ VR 미지원 - Guardian 설정 확인', 'rgba(244,67,54,0.4)');
+        }
+    } catch(e) {
+        log('❌ 지원 확인 실패: ' + e.message);
+        setStatus('❌ 환경 검사 실패', 'rgba(244,67,54,0.4)');
+    }
+}
+
+// ==========================================
+// VR 세션 관리 변수
+// ==========================================
+let xrSession = null;
+let xrRefSpace = null;
+let gl = null;  // ⭐️ WebGL 컨텍스트
+let frameCount = 0;
+let lastSendTime = 0;
+const SEND_HZ = 30;
+
+// ==========================================
+// 2단계: VR 세션 시작 (무한 로딩 해결 버전)
+// ==========================================
+async function startVR() {
+    log('🎯 VR 세션 시작 시도...');
+
+    if (!navigator.xr) {
+        log('❌ navigator.xr 없음');
+        return;
     }
 
-    // ==========================================
-    // 1단계: 환경 검사
-    // ==========================================
-    async function runCheck() {
-        log('=== 환경 검사 시작 ===');
-        
-        // HTTPS 확인
-        const isHttps = window.location.protocol === 'https:';
-        log((isHttps ? '✅' : '❌') + ' HTTPS: ' + window.location.protocol);
-        
-        if (!isHttps) {
-            setStatus('❌ HTTPS 필수!', 'rgba(244,67,54,0.4)');
-            return;
-        }
-
-        // WebXR 지원 확인
-        if (!navigator.xr) {
-            log('❌ navigator.xr 없음 (WebXR 미지원)');
-            setStatus('❌ WebXR 미지원 브라우저', 'rgba(244,67,54,0.4)');
-            return;
-        }
-        log('✅ navigator.xr 확인됨');
-
-        // immersive-vr 지원 확인
-        try {
-            const supported = await navigator.xr.isSessionSupported('immersive-vr');
-            log((supported ? '✅' : '❌') + ' immersive-vr: ' + (supported ? '지원됨' : '미지원'));
-
-            if (supported) {
-                setStatus('✅ 모든 검사 통과 - VR 시작 가능!', 'rgba(76,175,80,0.4)');
-                log('🎉 2단계 VR 시작을 눌러주세요!');
-            } else {
-                setStatus('❌ VR 미지원 - Guardian 설정 확인', 'rgba(244,67,54,0.4)');
-            }
-        } catch(e) {
-            log('❌ 지원 확인 실패: ' + e.message);
-            setStatus('❌ 환경 검사 실패', 'rgba(244,67,54,0.4)');
-        }
-    }
-
-    // ==========================================
-    // VR 세션 관리 변수
-    // ==========================================
-    let xrSession = null;
-    let xrRefSpace = null;
-    let frameCount = 0;
-    let lastSendTime = 0;
-    const SEND_HZ = 30;
-
-    // ==========================================
-    // 2단계: VR 세션 시작
-    // ==========================================
-    async function startVR() {
-        log('🎯 VR 세션 시작 시도...');
-
-        if (!navigator.xr) {
-            log('❌ navigator.xr 없음');
-            return;
-        }
-
-        try {
-            // VR 세션 요청
-            xrSession = await navigator.xr.requestSession('immersive-vr', {
-                optionalFeatures: ['local-floor']
-            });
-            log('✅ VR 세션 생성 성공!');
-
-            // 참조 공간 설정
-            try {
-                xrRefSpace = await xrSession.requestReferenceSpace('local-floor');
-                log('✅ local-floor 참조 공간 설정');
-            } catch(e) {
-                xrRefSpace = await xrSession.requestReferenceSpace('local');
-                log('✅ local 참조 공간 설정 (fallback)');
-            }
-
-            setStatus('🥽 VR 모드 실행 중!', 'rgba(76,175,80,0.5)');
-
-            // UI 숨기고 VR 모드 표시
-            document.querySelector('h1').style.display = 'none';
-            document.getElementById('status').style.display = 'none';
-            document.querySelectorAll('button').forEach(btn => btn.style.display = 'none');
-            document.getElementById('log').style.display = 'none';
-            document.body.style.background = '#000';
-
-            // 세션 종료 이벤트
-            xrSession.addEventListener('end', () => {
-                log('VR 세션 종료됨');
-                location.reload(); // 페이지 새로고침으로 초기 상태 복원
-            });
-
-            // XR 렌더링 루프 시작
-            xrSession.requestAnimationFrame(onXRFrame);
-            log('🚀 컨트롤러 추적 시작! 오른손을 움직여보세요.');
-
-        } catch(e) {
-            log('❌ VR 시작 실패: ' + e.name + ' - ' + e.message);
-            
-            const errorMessages = {
-                'NotAllowedError': 'Guardian 설정 또는 VR 권한 필요',
-                'NotSupportedError': '개발자 모드 활성화 필요',
-                'SecurityError': 'HTTPS 주소 확인 필요'
-            };
-            
-            const solution = errorMessages[e.name] || 'Quest 재부팅 후 재시도';
-            log('💡 해결책: ' + solution);
-            setStatus('❌ VR 시작 실패: ' + e.name, 'rgba(244,67,54,0.4)');
-        }
-    }
-
-    // ==========================================
-    // XR 프레임 루프 (컨트롤러 데이터 추출 및 전송)
-    // ==========================================
-    function onXRFrame(time, frame) {
-        if (!xrSession) return;
-
-        // 다음 프레임 예약
-        xrSession.requestAnimationFrame(onXRFrame);
-
-        // 전송 빈도 제한 (30Hz)
-        if (time - lastSendTime < 1000 / SEND_HZ) return;
-        lastSendTime = time;
-
-        // 입력 소스에서 오른손 컨트롤러 찾기
-        for (const inputSource of xrSession.inputSources) {
-            if (inputSource.handedness !== 'right') continue;
-            if (!inputSource.gripSpace) continue;
-
-            const pose = frame.getPose(inputSource.gripSpace, xrRefSpace);
-            if (!pose) continue;
-
-            const pos = pose.transform.position;
-            const ori = pose.transform.orientation;
-
-            // 서버로 데이터 전송
-            sendPoseToServer('right', pos.x, pos.y, pos.z, ori.x, ori.y, ori.z, ori.w);
-
-            frameCount++;
-            // 5초마다 로그 (150프레임 = 5초)
-            if (frameCount % 150 === 0) {
-                console.log('📊 VR 데이터 전송 중:', {
-                    x: pos.x.toFixed(3),
-                    y: pos.y.toFixed(3), 
-                    z: pos.z.toFixed(3)
-                });
-            }
-            
-            break; // 오른손만 처리
-        }
-    }
-
-    // ==========================================
-    // 서버로 포즈 데이터 전송
-    // ==========================================
-    function sendPoseToServer(hand, x, y, z, qx, qy, qz, qw) {
-        const data = {
-            hand: hand,
-            x: x, y: y, z: z,
-            qx: qx, qy: qy, qz: qz, qw: qw,
-            timestamp: Date.now() / 1000
-        };
-
-        fetch('/pose', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(data)
-        })
-        .then(response => response.json())
-        .then(result => {
-            // 서버 응답 처리
-            if (result.status === 'watchdog_home') {
-                console.log('⚠️ 워치독 발동 - 홈 위치로 복귀');
-            }
-        })
-        .catch(error => {
-            // 네트워크 에러는 조용히 무시 (다음 프레임에서 재시도)
-            console.debug('전송 에러:', error.message);
+    try {
+        // 1) VR 세션 요청
+        xrSession = await navigator.xr.requestSession('immersive-vr', {
+            optionalFeatures: ['local-floor']
         });
-    }
+        log('✅ VR 세션 생성 성공!');
 
-    // ==========================================
-    // 기준점 재설정
-    // ==========================================
-    function resetOrigin() {
-        log('🔄 VR 기준점 재설정 요청');
-        // 서버의 pipeline.reset_origin() 호출하거나 클라이언트에서 처리
-        fetch('/reset', { method: 'POST' })
-        .then(() => log('✅ 기준점 재설정 완료'))
-        .catch(() => log('🔄 기준점 재설정 (로컬 처리)'));
-    }
+        // ==========================================
+        // ⭐️ 무한 로딩 해결의 핵심: WebGL 레이어 설정
+        // ==========================================
+        const canvas = document.createElement('canvas');
+        gl = canvas.getContext('webgl', { xrCompatible: true });
+        
+        if (!gl) {
+            throw new Error('WebGL 컨텍스트 생성 실패');
+        }
+        
+        // Quest 3에 "이 WebGL로 화면을 그릴 것이다" 알려주기
+        xrSession.updateRenderState({
+            baseLayer: new XRWebGLLayer(xrSession, gl)
+        });
+        log('✅ WebGL 렌더링 레이어 연결 완료!');
+        // ==========================================
 
-    // ==========================================
-    // 초기화
-    // ==========================================
-    log('✅ G1 VR Teleoperation 페이지 로드 완료');
-    log('📋 1단계 환경 검사부터 시작하세요');
-    setStatus('✅ 준비 완료 - 1단계 검사를 시작하세요');
+        // 2) 참조 공간 설정
+        try {
+            xrRefSpace = await xrSession.requestReferenceSpace('local-floor');
+            log('✅ local-floor 참조 공간 설정');
+        } catch(e) {
+            xrRefSpace = await xrSession.requestReferenceSpace('local');
+            log('✅ local 참조 공간 설정 (fallback)');
+        }
+
+        setStatus('🥽 VR 모드 실행 중!', 'rgba(76,175,80,0.5)');
+
+        // 3) UI 숨기고 VR 모드로 전환
+        document.querySelector('h1').style.display = 'none';
+        document.getElementById('status').style.display = 'none';
+        document.querySelectorAll('button').forEach(btn => btn.style.display = 'none');
+        document.getElementById('log').style.display = 'none';
+        document.body.style.background = '#000';
+
+        // 4) 세션 종료 이벤트
+        xrSession.addEventListener('end', () => {
+            log('VR 세션 종료됨');
+            location.reload(); // 페이지 새로고침으로 초기 상태 복원
+        });
+
+        // 5) XR 렌더링 루프 시작
+        xrSession.requestAnimationFrame(onXRFrame);
+        log('🚀 컨트롤러 추적 시작! 오른손을 움직여보세요.');
+
+    } catch(e) {
+        log('❌ VR 시작 실패: ' + e.name + ' - ' + e.message);
+        
+        const errorMessages = {
+            'NotAllowedError': 'Guardian 설정 또는 VR 권한 필요',
+            'NotSupportedError': '개발자 모드 활성화 필요',
+            'SecurityError': 'HTTPS 주소 확인 필요'
+        };
+        
+        const solution = errorMessages[e.name] || 'Quest 재부팅 후 재시도';
+        log('💡 해결책: ' + solution);
+        setStatus('❌ VR 시작 실패: ' + e.name, 'rgba(244,67,54,0.4)');
+    }
+}
+
+// ==========================================
+// XR 프레임 루프 (컨트롤러 데이터 추출)
+// ==========================================
+function onXRFrame(time, frame) {
+    if (!xrSession || !gl) return;
+
+    // 다음 프레임 예약
+    xrSession.requestAnimationFrame(onXRFrame);
+
+    // ⭐️ 화면을 검은색으로 칠해줌 (무한로딩 방지의 핵심!)
+    gl.bindFramebuffer(gl.FRAMEBUFFER, xrSession.renderState.baseLayer.framebuffer);
+    gl.clearColor(0.0, 0.0, 0.0, 1.0); // 검은색
+    gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+
+    // 전송 빈도 제한 (30Hz)
+    if (time - lastSendTime < 1000 / SEND_HZ) return;
+    lastSendTime = time;
+
+    // 오른손 컨트롤러 찾기 및 데이터 전송
+    for (const inputSource of xrSession.inputSources) {
+        if (inputSource.handedness !== 'right') continue;
+        if (!inputSource.gripSpace) continue;
+
+        const pose = frame.getPose(inputSource.gripSpace, xrRefSpace);
+        if (!pose) continue;
+
+        const pos = pose.transform.position;
+        const ori = pose.transform.orientation;
+
+        // 서버로 데이터 전송
+        sendPoseToServer('right', pos.x, pos.y, pos.z, ori.x, ori.y, ori.z, ori.w);
+
+        frameCount++;
+        // 5초마다 로그 (150프레임 = 5초)
+        if (frameCount % 150 === 0) {
+            console.log('📊 VR 데이터 전송 중:', {
+                x: pos.x.toFixed(3),
+                y: pos.y.toFixed(3), 
+                z: pos.z.toFixed(3)
+            });
+        }
+        
+        break; // 오른손만 처리
+    }
+}
+
+// ==========================================
+// 서버로 포즈 데이터 전송
+// ==========================================
+function sendPoseToServer(hand, x, y, z, qx, qy, qz, qw) {
+    const data = {
+        hand: hand,
+        x: x, y: y, z: z,
+        qx: qx, qy: qy, qz: qz, qw: qw,
+        timestamp: Date.now() / 1000
+    };
+
+    fetch('/pose', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(data)
+    })
+    .then(response => response.json())
+    .then(result => {
+        // 서버 응답 처리 (필요시)
+        if (result.status === 'watchdog_home') {
+            console.log('⚠️ 워치독 발동 - 홈 위치로 복귀');
+        }
+    })
+    .catch(error => {
+        // 네트워크 에러는 조용히 무시 (다음 프레임에서 재시도)
+        console.debug('전송 에러:', error.message);
+    });
+}
+
+// ==========================================
+// 초기화
+// ==========================================
+log('✅ G1 VR Teleoperation 페이지 로드 완료');
+log('📋 1단계 환경 검사부터 시작하세요');
+setStatus('✅ 준비 완료 - 1단계 검사를 시작하세요');
 </script>
 </body>
 </html>"""
-
-
-# ==========================================
-# 서버 실행 (기존과 동일)
-# ==========================================
-if __name__ == '__main__':
-    httpd = HTTPServer((HOST, PORT), Handler)
-    httpd.socket = ssl.wrap_socket(
-        httpd.socket,
-        keyfile="key.pem",
-        certfile="cert.pem",
-        server_side=True
-    )
-
-    print(f"🚀 G1 VR Teleoperation 서버 시작")
-    print(f"🌐 접속 주소: https://{HOST}:{PORT}")
-    print(f"📊 상태 확인: https://{HOST}:{PORT}/status")
-    print(f"🛑 종료하려면 Ctrl+C")
-    
-    try:
-        httpd.serve_forever()
-    except KeyboardInterrupt:
-        print("\n🛑 서버 종료 중...")
