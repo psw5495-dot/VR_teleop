@@ -1,2 +1,9 @@
-source /opt/ros/humble/setup.bash
-ros2 topic echo /quest3/right_hand_pose
+cd ~/TeleVision
+mkdir -p static/js
+
+# Three.js 다운로드
+wget -O static/js/three.min.js \
+  "https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"
+
+# 파일 크기 확인 (약 600KB여야 정상)
+ls -lh static/js/three.min.js
