@@ -1,248 +1,311 @@
 #!/usr/bin/env python3
 """
-Quest 3 HTTP POST + teleop_pipeline + ROS 2 통합 서버
+teleop_pipeline.py
+Quest 3 VR 데이터를 로봇 제어 좌표로 변환하는 완전한 파이프라인
+- 손떨림 필터링 (EMA)
+- 안전 제한 (최대 이동 거리)
+- 좌표계 변환 (VR ↔ 로봇)
+- 워치독 (연결 끊김 감지)
 """
 
-from http.server import HTTPServer, SimpleHTTPRequestHandler
-import ssl
-import json
-import threading
 import time
-
-# ROS 2 연동 (선택적 - 없어도 기본 기능 동작)
-try:
-    import rclpy
-    from rclpy.node import Node
-    from geometry_msgs.msg import PoseStamped
-    ROS2_AVAILABLE = True
-    print("✅ ROS 2 연동 준비 완료")
-except ImportError as e:
-    ROS2_AVAILABLE = False
-    print(f"⚠️  ROS 2 없이 실행: {e}")
-
-# teleop_pipeline 연동
-try:
-    from teleop_pipeline import TeleopConfig, TeleopPipeline, parse_frame_from_json
-    PIPELINE_AVAILABLE = True
-    print("✅ teleop_pipeline 로드 성공")
-except ImportError as e:
-    PIPELINE_AVAILABLE = False
-    print(f"❌ teleop_pipeline 로드 실패: {e}")
-    exit(1)
-
-HOST = "0.0.0.0"
-PORT = 8443
+from dataclasses import dataclass
+from typing import Tuple, Dict, Any, Optional
 
 # ==========================================
-# ROS 2 노드 (G1 로봇용)
+# 설정 및 데이터 구조
 # ==========================================
-class G1TeleopNode(Node):
-    def __init__(self):
-        super().__init__('g1_teleop_node')
-        
-        # G1 로봇을 위한 토픽 (IK 노드에서 구독할 예정)
-        self.target_pose_pub = self.create_publisher(
-            PoseStamped, '/g1/target_pose', 10
-        )
-        
-        # 원시 VR 데이터도 발행 (디버깅용)
-        self.vr_pose_pub = self.create_publisher(
-            PoseStamped, '/quest3/right_hand_pose', 10
-        )
-        
-        self.msg_count = 0
-        self.start_time = time.time()
-        self.get_logger().info("🤖 G1 Teleop Node 시작")
-        self.get_logger().info("📡 토픽: /g1/target_pose, /quest3/right_hand_pose")
 
-    def publish_from_pipeline_result(self, result):
-        """teleop_pipeline 결과를 ROS 2 메시지로 변환"""
-        try:
-            # 파이프라인에서 처리된 최종 목표 좌표
-            if 'target_pose' in result:
-                target = result['target_pose']
-                msg = PoseStamped()
-                msg.header.stamp = self.get_clock().now().to_msg()
-                msg.header.frame_id = 'g1_base_link'
-                
-                msg.pose.position.x = float(target.get('x', 0))
-                msg.pose.position.y = float(target.get('y', 0))
-                msg.pose.position.z = float(target.get('z', 0))
-                
-                # 회전은 기본값 또는 파이프라인 결과 사용
-                msg.pose.orientation.x = float(target.get('qx', 0))
-                msg.pose.orientation.y = float(target.get('qy', 0))
-                msg.pose.orientation.z = float(target.get('qz', 0))
-                msg.pose.orientation.w = float(target.get('qw', 1))
-                
-                self.target_pose_pub.publish(msg)
-                
-            # 원시 VR 데이터도 발행 (필요시)
-            if 'raw_vr_pose' in result:
-                raw = result['raw_vr_pose']
-                vr_msg = PoseStamped()
-                vr_msg.header.stamp = self.get_clock().now().to_msg()
-                vr_msg.header.frame_id = 'quest3_world'
-                
-                vr_msg.pose.position.x = float(raw.get('x', 0))
-                vr_msg.pose.position.y = float(raw.get('y', 0))
-                vr_msg.pose.position.z = float(raw.get('z', 0))
-                vr_msg.pose.orientation.x = float(raw.get('qx', 0))
-                vr_msg.pose.orientation.y = float(raw.get('qy', 0))
-                vr_msg.pose.orientation.z = float(raw.get('qz', 0))
-                vr_msg.pose.orientation.w = float(raw.get('qw', 1))
-                
-                self.vr_pose_pub.publish(vr_msg)
-                
-            self.msg_count += 1
+@dataclass
+class TeleopConfig:
+    """텔레오퍼레이션 파이프라인 설정"""
+    
+    # 스케일링 (VR 움직임 → 로봇 움직임 비율)
+    pos_scale: float = 0.5
+    
+    # 로봇 홈 포지션 (기준점)
+    robot_home_pos: Tuple[float, float, float] = (0.35, -0.20, 0.45)
+    
+    # 안전 제한 (한 프레임당 최대 이동 거리, 단위: m)
+    max_dx: float = 0.10
+    max_dy: float = 0.10
+    max_dz: float = 0.10
+    
+    # EMA 필터 계수 (0~1: 작을수록 부드럽지만 지연 증가)
+    ema_alpha: float = 0.15
+    
+    # 워치독 타임아웃 (초): 이 시간 동안 데이터 없으면 홈으로 복귀
+    watchdog_timeout_s: float = 0.3
+    
+    # 좌표축 부호 변환 (VR ↔ 로봇 좌표계 맞추기)
+    axis_sign: Tuple[float, float, float] = (1.0, -1.0, -1.0)
+
+
+@dataclass
+class TeleopFrame:
+    """Quest 3에서 수신한 VR 프레임 데이터"""
+    x: float = 0.0
+    y: float = 0.0
+    z: float = 0.0
+    qx: float = 0.0
+    qy: float = 0.0
+    qz: float = 0.0
+    qw: float = 1.0
+    hand: str = 'right'
+    timestamp: float = 0.0
+    tracked: bool = True
+
+
+# ==========================================
+# JSON 파싱 함수
+# ==========================================
+
+def parse_frame_from_json(data: Dict[str, Any]) -> TeleopFrame:
+    """
+    Quest 3에서 전송된 JSON 데이터를 TeleopFrame으로 변환
+    
+    지원 형식:
+    1. Flat 형식: {"hand": "right", "x": 0.1, "y": 0.2, "z": 0.3, ...}
+    2. Nested 형식: {"right": {"position": {"x": 0.1, ...}, ...}}
+    """
+    
+    frame = TeleopFrame()
+    frame.timestamp = data.get('timestamp', time.time())
+    
+    # ----- Flat 형식 파싱 (사용자 코드에서 사용하는 형식) -----
+    if 'hand' in data or 'x' in data:
+        frame.x = float(data.get('x', 0.0))
+        frame.y = float(data.get('y', 0.0))
+        frame.z = float(data.get('z', 0.0))
+        frame.qx = float(data.get('qx', 0.0))
+        frame.qy = float(data.get('qy', 0.0))
+        frame.qz = float(data.get('qz', 0.0))
+        frame.qw = float(data.get('qw', 1.0))
+        frame.hand = data.get('hand', 'right')
+        frame.tracked = True
+        return frame
+    
+    # ----- Nested 형식 파싱 -----
+    if 'right' in data:
+        right = data['right']
+        if 'position' in right:
+            pos = right['position']
+            frame.x = float(pos.get('x', 0.0))
+            frame.y = float(pos.get('y', 0.0))
+            frame.z = float(pos.get('z', 0.0))
+        
+        if 'quaternion' in right:
+            quat = right['quaternion']
+            frame.qx = float(quat.get('x', 0.0))
+            frame.qy = float(quat.get('y', 0.0))
+            frame.qz = float(quat.get('z', 0.0))
+            frame.qw = float(quat.get('w', 1.0))
+        
+        frame.hand = 'right'
+        frame.tracked = bool(right.get('tracked', True))
+    
+    return frame
+
+
+# ==========================================
+# 핵심 파이프라인 클래스
+# ==========================================
+
+class TeleopPipeline:
+    """
+    VR 데이터를 로봇 제어 명령으로 변환하는 파이프라인
+    
+    처리 순서:
+    1. 워치독 체크 (연결 상태 확인)
+    2. VR 기준점 설정 (초기 위치 보정)
+    3. 상대 이동량 계산
+    4. 좌표계 변환 및 스케일링
+    5. EMA 필터 (손떨림 제거)
+    6. 안전 제한 (급격한 움직임 방지)
+    """
+    
+    def __init__(self, config: TeleopConfig):
+        self.cfg = config
+        
+        # EMA 필터 상태
+        self.last_target_pos: Optional[Tuple[float, float, float]] = None
+        
+        # 워치독 및 타이밍
+        self.last_frame_time: float = 0.0
+        
+        # VR 기준점 (처음 받은 위치를 0,0,0으로 설정)
+        self.vr_origin: Optional[Tuple[float, float, float]] = None
+        self.origin_set: bool = False
+        
+        print(f"✅ TeleopPipeline 초기화 완료")
+        print(f"   홈 포지션: {config.robot_home_pos}")
+        print(f"   스케일: {config.pos_scale}, EMA: {config.ema_alpha}")
+    
+    def reset_origin(self):
+        """VR 기준점 재설정 (재보정 시 사용)"""
+        self.origin_set = False
+        self.vr_origin = None
+        self.last_target_pos = None
+        print("🔄 VR 기준점 초기화됨")
+    
+    def process(self, frame: TeleopFrame) -> Dict[str, Any]:
+        """
+        TeleopFrame을 처리하여 로봇 제어 명령 생성
+        
+        Returns:
+            dict: 사용자 코드에서 기대하는 형식의 결과
+        """
+        current_time = time.time()
+        
+        # ----------------------------------------
+        # 1. 워치독 체크 (연결 끊김 감지)
+        # ----------------------------------------
+        if self.last_frame_time > 0:
+            dt = current_time - self.last_frame_time
+            if dt > self.cfg.watchdog_timeout_s:
+                print(f"⚠️  워치독 발동: {dt:.2f}초 데이터 없음 - 홈으로 복귀")
+                self.reset_origin()
+                return self._create_home_result(frame)
+        
+        self.last_frame_time = current_time
+        
+        # ----------------------------------------
+        # 2. VR 기준점 설정 (첫 프레임 또는 재연결 시)
+        # ----------------------------------------
+        if not self.origin_set:
+            self.vr_origin = (frame.x, frame.y, frame.z)
+            self.last_target_pos = self.cfg.robot_home_pos
+            self.origin_set = True
+            print(f"📍 VR 기준점 설정: ({frame.x:.3f}, {frame.y:.3f}, {frame.z:.3f})")
+        
+        # ----------------------------------------
+        # 3. 상대 이동량 계산 (기준점 대비 델타)
+        # ----------------------------------------
+        delta_x = frame.x - self.vr_origin[0]
+        delta_y = frame.y - self.vr_origin[1]
+        delta_z = frame.z - self.vr_origin[2]
+        
+        # ----------------------------------------
+        # 4. 좌표계 변환 및 스케일링
+        # ----------------------------------------
+        # 축 부호 변환 (VR → 로봇 좌표계)
+        scaled_dx = delta_x * self.cfg.pos_scale * self.cfg.axis_sign[0]
+        scaled_dy = delta_y * self.cfg.pos_scale * self.cfg.axis_sign[1]
+        scaled_dz = delta_z * self.cfg.pos_scale * self.cfg.axis_sign[2]
+        
+        # 홈 포지션 기준 절대 좌표
+        target_x = self.cfg.robot_home_pos[0] + scaled_dx
+        target_y = self.cfg.robot_home_pos[1] + scaled_dy
+        target_z = self.cfg.robot_home_pos[2] + scaled_dz
+        
+        # ----------------------------------------
+        # 5. EMA 필터 (손떨림 제거)
+        # ----------------------------------------
+        if self.last_target_pos is not None:
+            alpha = self.cfg.ema_alpha
+            target_x = alpha * target_x + (1 - alpha) * self.last_target_pos[0]
+            target_y = alpha * target_y + (1 - alpha) * self.last_target_pos[1]
+            target_z = alpha * target_z + (1 - alpha) * self.last_target_pos[2]
+        
+        # ----------------------------------------
+        # 6. 안전 제한 (급격한 움직임 방지)
+        # ----------------------------------------
+        if self.last_target_pos is not None:
+            # 이전 프레임 대비 이동량 제한
+            dx = target_x - self.last_target_pos[0]
+            dy = target_y - self.last_target_pos[1]
+            dz = target_z - self.last_target_pos[2]
             
-            # 통계 출력
-            if self.msg_count % 150 == 0:  # 5초마다 (30Hz 기준)
-                elapsed = time.time() - self.start_time
-                rate = self.msg_count / elapsed if elapsed > 0 else 0
-                self.get_logger().info(f"📊 {self.msg_count}개 메시지, 평균 {rate:.1f}Hz")
-                
-        except Exception as e:
-            self.get_logger().error(f"ROS 발행 에러: {e}")
-
-# 전역 ROS 노드
-ros_node = None
-
-def ros_spin_thread():
-    """ROS 2 노드를 별도 스레드에서 실행"""
-    global ros_node
-    rclpy.init()
-    ros_node = G1TeleopNode()
-    try:
-        rclpy.spin(ros_node)
-    except KeyboardInterrupt:
-        pass
-    finally:
-        ros_node.destroy_node()
-        rclpy.shutdown()
-
-# ==========================================
-# Teleop pipeline 초기화 (기존 설정 유지)
-# ==========================================
-cfg = TeleopConfig(
-    pos_scale=0.5,
-    robot_home_pos=(0.35, -0.20, 0.45),
-    max_dx=0.10,
-    max_dy=0.10,
-    max_dz=0.10,
-    ema_alpha=0.15,
-    watchdog_timeout_s=0.3,
-    axis_sign=(1.0, -1.0, -1.0),
-)
-
-pipeline = TeleopPipeline(cfg)
-
-# ==========================================
-# HTTP 핸들러 (기존 로직 + ROS 2 추가)
-# ==========================================
-class TeleopHandler(SimpleHTTPRequestHandler):
-    def do_POST(self):
-        if self.path == "/pose":
-            length = int(self.headers.get("Content-Length", "0"))
-            raw = self.rfile.read(length)
-
-            try:
-                data = json.loads(raw.decode("utf-8"))
-
-                # 1) Quest JSON -> TeleopFrame (기존 로직)
-                frame = parse_frame_from_json(data)
-
-                # 2) Teleop pipeline 실행 (기존 로직)
-                result = pipeline.process(frame)
-
-                # 3) 서버 로그 출력 (기존 로직)
-                print("\n=== TELEOP RESULT ===")
-                print(json.dumps(result, indent=2, ensure_ascii=False))
-
-                # 4) ⭐️ ROS 2로 발행 (새로 추가된 기능)
-                if ROS2_AVAILABLE and ros_node:
-                    ros_node.publish_from_pipeline_result(result)
-
-                # 5) 브라우저에 응답 (기존 로직)
-                response = json.dumps(result).encode("utf-8")
-                self.send_response(200)
-                self.send_header("Content-Type", "application/json")
-                self.send_header("Content-Length", str(len(response)))
-                self.send_header("Access-Control-Allow-Origin", "*")
-                self.end_headers()
-                self.wfile.write(response)
-
-            except Exception as e:
-                print("POST parse/process error:", e)
-                import traceback
-                traceback.print_exc()
-                
-                err = json.dumps({"ok": False, "error": str(e)}).encode("utf-8")
-                self.send_response(500)
-                self.send_header("Content-Type", "application/json")
-                self.send_header("Content-Length", str(len(err)))
-                self.end_headers()
-                self.wfile.write(err)
-
-        else:
-            self.send_response(404)
-            self.end_headers()
-
-    def do_GET(self):
-        """상태 확인 API"""
-        if self.path == "/status":
-            status = {
-                'server': 'running',
-                'ros2_available': ROS2_AVAILABLE,
-                'ros2_connected': ros_node is not None,
-                'pipeline_available': PIPELINE_AVAILABLE,
-                'message_count': ros_node.msg_count if ros_node else 0
+            # 클리핑
+            dx = max(-self.cfg.max_dx, min(self.cfg.max_dx, dx))
+            dy = max(-self.cfg.max_dy, min(self.cfg.max_dy, dy))
+            dz = max(-self.cfg.max_dz, min(self.cfg.max_dz, dz))
+            
+            target_x = self.last_target_pos[0] + dx
+            target_y = self.last_target_pos[1] + dy
+            target_z = self.last_target_pos[2] + dz
+        
+        # 현재 타겟 저장 (다음 프레임 기준)
+        self.last_target_pos = (target_x, target_y, target_z)
+        
+        # ----------------------------------------
+        # 7. 결과 반환 (사용자 코드 호환 형식)
+        # ----------------------------------------
+        return {
+            "target_pose": {
+                "x": round(target_x, 4),
+                "y": round(target_y, 4),
+                "z": round(target_z, 4),
+                "qx": round(frame.qx, 4),
+                "qy": round(frame.qy, 4),
+                "qz": round(frame.qz, 4),
+                "qw": round(frame.qw, 4),
+            },
+            "raw_vr_pose": {
+                "x": round(frame.x, 4),
+                "y": round(frame.y, 4),
+                "z": round(frame.z, 4),
+                "qx": round(frame.qx, 4),
+                "qy": round(frame.qy, 4),
+                "qz": round(frame.qz, 4),
+                "qw": round(frame.qw, 4),
+            },
+            "status": "ok",
+            "delta": {
+                "dx": round(scaled_dx, 4),
+                "dy": round(scaled_dy, 4),
+                "dz": round(scaled_dz, 4),
             }
-            response = json.dumps(status, indent=2).encode("utf-8")
-            self.send_response(200)
-            self.send_header("Content-Type", "application/json")
-            self.send_header("Content-Length", str(len(response)))
-            self.end_headers()
-            self.wfile.write(response)
-        else:
-            super().do_GET()
+        }
+    
+    def _create_home_result(self, frame: TeleopFrame) -> Dict[str, Any]:
+        """홈 포지션 결과 생성 (워치독 발동 시)"""
+        return {
+            "target_pose": {
+                "x": self.cfg.robot_home_pos[0],
+                "y": self.cfg.robot_home_pos[1],
+                "z": self.cfg.robot_home_pos[2],
+                "qx": 0.0, "qy": 0.0, "qz": 0.0, "qw": 1.0,
+            },
+            "raw_vr_pose": {
+                "x": frame.x, "y": frame.y, "z": frame.z,
+                "qx": frame.qx, "qy": frame.qy, "qz": frame.qz, "qw": frame.qw,
+            },
+            "status": "watchdog_home",
+            "delta": {"dx": 0.0, "dy": 0.0, "dz": 0.0}
+        }
 
-    def do_OPTIONS(self):
-        """CORS 처리"""
-        self.send_response(200)
-        self.send_header("Access-Control-Allow-Origin", "*")
-        self.send_header("Access-Control-Allow-Methods", "POST, GET, OPTIONS")
-        self.send_header("Access-Control-Allow-Headers", "Content-Type")
-        self.end_headers()
 
 # ==========================================
-# 메인 실행
+# 테스트 코드
 # ==========================================
 if __name__ == '__main__':
-    print("🚀 G1 VR Teleoperation 통합 서버 시작")
+    print("=== teleop_pipeline 테스트 ===")
     
-    # ROS 2 노드를 백그라운드에서 실행
-    if ROS2_AVAILABLE:
-        ros_thread = threading.Thread(target=ros_spin_thread, daemon=True)
-        ros_thread.start()
-        time.sleep(2)  # ROS 노드 초기화 대기
-        print("✅ ROS 2 노드 시작 완료")
-
-    # HTTPS 서버 실행 (기존 방식 유지)
-    httpd = HTTPServer((HOST, PORT), TeleopHandler)
-    httpd.socket = ssl.wrap_socket(
-        httpd.socket,
-        keyfile="key.pem",
-        certfile="cert.pem",
-        server_side=True
+    # 사용자 설정과 동일한 구성
+    cfg = TeleopConfig(
+        pos_scale=0.5,
+        robot_home_pos=(0.35, -0.20, 0.45),
+        max_dx=0.10, max_dy=0.10, max_dz=0.10,
+        ema_alpha=0.15,
+        watchdog_timeout_s=0.3,
+        axis_sign=(1.0, -1.0, -1.0),
     )
-
-    print(f"🌐 서버 주소: https://{HOST}:{PORT}")
-    print(f"📊 상태 확인: https://{HOST}:{PORT}/status")
-    print(f"📡 ROS 2 토픽: /g1/target_pose")
-    print(f"🛑 종료하려면 Ctrl+C")
     
-    try:
-        httpd.serve_forever()
-    except KeyboardInterrupt:
-        print("\n🛑 서버 종료 중...")
+    pipeline = TeleopPipeline(cfg)
+    
+    # 테스트 JSON (사용자 코드에서 사용하는 flat 형식)
+    test_json = {
+        "hand": "right",
+        "x": 0.1, "y": 0.5, "z": -0.3,
+        "qx": 0.0, "qy": 0.0, "qz": 0.0, "qw": 1.0,
+        "timestamp": time.time()
+    }
+    
+    print("\n--- 테스트 실행 ---")
+    frame = parse_frame_from_json(test_json)
+    result = pipeline.process(frame)
+    
+    import json
+    print(json.dumps(result, indent=2, ensure_ascii=False))
+    print("\n✅ teleop_pipeline 테스트 완료!")
