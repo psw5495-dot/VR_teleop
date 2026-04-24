@@ -1,0 +1,27 @@
+# 1. TeleVision 폴더로 이동
+cd ~/TeleVision
+
+# 2. conda 경로 완전 제거 (이전 설정 정리)
+export PATH=$(echo "$PATH" | tr ':' '\n' | grep -v "miniconda3\|anaconda3" | paste -sd ':' -)
+export LD_LIBRARY_PATH=$(echo "${LD_LIBRARY_PATH:-}" | tr ':' '\n' | grep -v "miniconda3\|anaconda3" | paste -sd ':' -)
+
+# 3. ⭐️ 가장 중요: ROS 2 환경 완전 로드
+source /opt/ros/humble/setup.bash
+
+# 4. ROS 라이브러리 경로 명시적 추가 (확실히 하기 위해)
+export LD_LIBRARY_PATH=/opt/ros/humble/lib:$LD_LIBRARY_PATH
+
+# 5. libstdc++ 충돌 방지 (conda 잔재 대비)
+export LD_PRELOAD=/usr/lib/x86_64-linux-gnu/libstdc++.so.6
+
+# 6. Python 가상환경 활성화
+source tv_env/bin/activate
+
+# 7. PYTHONPATH 설정
+export PYTHONPATH=/opt/ros/humble/local/lib/python3.10/dist-packages:/opt/ros/humble/lib/python3.10/site-packages:$(pwd):$PYTHONPATH
+
+# 8. 환경 검증
+python -c "import rclpy; print('✅ rclpy 로드 성공!')"
+
+# 9. 서버 실행
+python serve_webxr.py --port 8443 --ssl-cert cert.pem --ssl-key key.pem
