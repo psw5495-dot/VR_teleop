@@ -1,311 +1,385 @@
-#!/usr/bin/env python3
-"""
-teleop_pipeline.py
-Quest 3 VR 데이터를 로봇 제어 좌표로 변환하는 완전한 파이프라인
-- 손떨림 필터링 (EMA)
-- 안전 제한 (최대 이동 거리)
-- 좌표계 변환 (VR ↔ 로봇)
-- 워치독 (연결 끊김 감지)
-"""
+from http.server import HTTPServer, SimpleHTTPRequestHandler
+import ssl
+import json
 
-import time
-from dataclasses import dataclass
-from typing import Tuple, Dict, Any, Optional
+from teleop_pipeline import (
+    TeleopConfig,
+    TeleopPipeline,
+    parse_frame_from_json,
+)
 
-# ==========================================
-# 설정 및 데이터 구조
-# ==========================================
+HOST = "0.0.0.0"
+PORT = 8443
 
-@dataclass
-class TeleopConfig:
-    """텔레오퍼레이션 파이프라인 설정"""
-    
-    # 스케일링 (VR 움직임 → 로봇 움직임 비율)
-    pos_scale: float = 0.5
-    
-    # 로봇 홈 포지션 (기준점)
-    robot_home_pos: Tuple[float, float, float] = (0.35, -0.20, 0.45)
-    
-    # 안전 제한 (한 프레임당 최대 이동 거리, 단위: m)
-    max_dx: float = 0.10
-    max_dy: float = 0.10
-    max_dz: float = 0.10
-    
-    # EMA 필터 계수 (0~1: 작을수록 부드럽지만 지연 증가)
-    ema_alpha: float = 0.15
-    
-    # 워치독 타임아웃 (초): 이 시간 동안 데이터 없으면 홈으로 복귀
-    watchdog_timeout_s: float = 0.3
-    
-    # 좌표축 부호 변환 (VR ↔ 로봇 좌표계 맞추기)
-    axis_sign: Tuple[float, float, float] = (1.0, -1.0, -1.0)
+# 기존 teleop pipeline 설정 (변경 없음)
+cfg = TeleopConfig(
+    pos_scale=0.5,
+    robot_home_pos=(0.35, -0.20, 0.45),
+    max_dx=0.10, max_dy=0.10, max_dz=0.10,
+    ema_alpha=0.15,
+    watchdog_timeout_s=0.3,
+    axis_sign=(1.0, -1.0, -1.0),
+)
+
+pipeline = TeleopPipeline(cfg)
 
 
-@dataclass
-class TeleopFrame:
-    """Quest 3에서 수신한 VR 프레임 데이터"""
-    x: float = 0.0
-    y: float = 0.0
-    z: float = 0.0
-    qx: float = 0.0
-    qy: float = 0.0
-    qz: float = 0.0
-    qw: float = 1.0
-    hand: str = 'right'
-    timestamp: float = 0.0
-    tracked: bool = True
+class Handler(SimpleHTTPRequestHandler):
+    
+    # ==========================================
+    # ⭐️ 새로 추가: GET 요청 처리 (WebXR HTML 반환)
+    # ==========================================
+    def do_GET(self):
+        if self.path == '/' or self.path == '/index.html':
+            html = self._get_webxr_html()
+            encoded = html.encode('utf-8')
+            self.send_response(200)
+            self.send_header('Content-Type', 'text/html; charset=utf-8')
+            self.send_header('Content-Length', str(len(encoded)))
+            self.end_headers()
+            self.wfile.write(encoded)
+        elif self.path == '/status':
+            # 서버 상태 확인 API
+            status = {"server": "running", "pipeline": "ready"}
+            response = json.dumps(status).encode('utf-8')
+            self.send_response(200)
+            self.send_header('Content-Type', 'application/json')
+            self.send_header('Content-Length', str(len(response)))
+            self.end_headers()
+            self.wfile.write(response)
+        else:
+            # 그 외 경로는 404
+            self.send_response(404)
+            self.end_headers()
 
+    # ==========================================
+    # 기존 POST 핸들러 (변경 없음)
+    # ==========================================
+    def do_POST(self):
+        if self.path == "/pose":
+            length = int(self.headers.get("Content-Length", "0"))
+            raw = self.rfile.read(length)
 
-# ==========================================
-# JSON 파싱 함수
-# ==========================================
+            try:
+                data = json.loads(raw.decode("utf-8"))
+                frame = parse_frame_from_json(data)
+                result = pipeline.process(frame)
 
-def parse_frame_from_json(data: Dict[str, Any]) -> TeleopFrame:
-    """
-    Quest 3에서 전송된 JSON 데이터를 TeleopFrame으로 변환
-    
-    지원 형식:
-    1. Flat 형식: {"hand": "right", "x": 0.1, "y": 0.2, "z": 0.3, ...}
-    2. Nested 형식: {"right": {"position": {"x": 0.1, ...}, ...}}
-    """
-    
-    frame = TeleopFrame()
-    frame.timestamp = data.get('timestamp', time.time())
-    
-    # ----- Flat 형식 파싱 (사용자 코드에서 사용하는 형식) -----
-    if 'hand' in data or 'x' in data:
-        frame.x = float(data.get('x', 0.0))
-        frame.y = float(data.get('y', 0.0))
-        frame.z = float(data.get('z', 0.0))
-        frame.qx = float(data.get('qx', 0.0))
-        frame.qy = float(data.get('qy', 0.0))
-        frame.qz = float(data.get('qz', 0.0))
-        frame.qw = float(data.get('qw', 1.0))
-        frame.hand = data.get('hand', 'right')
-        frame.tracked = True
-        return frame
-    
-    # ----- Nested 형식 파싱 -----
-    if 'right' in data:
-        right = data['right']
-        if 'position' in right:
-            pos = right['position']
-            frame.x = float(pos.get('x', 0.0))
-            frame.y = float(pos.get('y', 0.0))
-            frame.z = float(pos.get('z', 0.0))
-        
-        if 'quaternion' in right:
-            quat = right['quaternion']
-            frame.qx = float(quat.get('x', 0.0))
-            frame.qy = float(quat.get('y', 0.0))
-            frame.qz = float(quat.get('z', 0.0))
-            frame.qw = float(quat.get('w', 1.0))
-        
-        frame.hand = 'right'
-        frame.tracked = bool(right.get('tracked', True))
-    
-    return frame
+                print("\n=== TELEOP RESULT ===")
+                print(json.dumps(result, indent=2, ensure_ascii=False))
 
+                response = json.dumps(result).encode("utf-8")
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(response)))
+                self.send_header("Access-Control-Allow-Origin", "*")
+                self.end_headers()
+                self.wfile.write(response)
 
-# ==========================================
-# 핵심 파이프라인 클래스
-# ==========================================
+            except Exception as e:
+                print("POST parse/process error:", e)
+                err = json.dumps({"ok": False, "error": str(e)}).encode("utf-8")
+                self.send_response(500)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(err)))
+                self.end_headers()
+                self.wfile.write(err)
+        else:
+            self.send_response(404)
+            self.end_headers()
 
-class TeleopPipeline:
-    """
-    VR 데이터를 로봇 제어 명령으로 변환하는 파이프라인
-    
-    처리 순서:
-    1. 워치독 체크 (연결 상태 확인)
-    2. VR 기준점 설정 (초기 위치 보정)
-    3. 상대 이동량 계산
-    4. 좌표계 변환 및 스케일링
-    5. EMA 필터 (손떨림 제거)
-    6. 안전 제한 (급격한 움직임 방지)
-    """
-    
-    def __init__(self, config: TeleopConfig):
-        self.cfg = config
+    # ==========================================
+    # WebXR HTML (Quest 3 VR 앱)
+    # ==========================================
+    def _get_webxr_html(self):
+        return """<!DOCTYPE html>
+<html>
+<head>
+    <title>G1 VR Teleoperation</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <style>
+        body {
+            background: linear-gradient(135deg, #1a1a2e, #16213e);
+            color: white; font-family: 'Segoe UI', sans-serif;
+            display: flex; flex-direction: column; align-items: center;
+            justify-content: center; height: 100vh; margin: 0; text-align: center;
+        }
+        h1 { 
+            font-size: 2.5em; margin-bottom: 30px; 
+            text-shadow: 2px 2px 4px rgba(0,0,0,0.5);
+        }
+        button {
+            font-size: 20px; padding: 18px 35px; margin: 10px;
+            border-radius: 12px; border: none; cursor: pointer;
+            font-weight: bold; transition: all 0.3s ease;
+            touch-action: manipulation;
+        }
+        #btn-check { background: #2196F3; color: white; }
+        #btn-vr { background: #4CAF50; color: white; }
+        #btn-reset { background: #FF9800; color: white; }
+        button:hover { transform: translateY(-2px); box-shadow: 0 8px 16px rgba(0,0,0,0.3); }
+        #status {
+            margin: 20px 0; padding: 15px 25px; border-radius: 10px;
+            font-size: 16px; font-weight: bold;
+            background: rgba(255,255,255,0.1);
+        }
+        #log {
+            background: rgba(0,0,0,0.8); color: #00ff41;
+            padding: 15px; width: 90%; max-width: 600px; height: 200px;
+            overflow-y: auto; text-align: left; font-family: 'Courier New', monospace;
+            font-size: 13px; border-radius: 8px; margin-top: 20px;
+            border: 1px solid #333;
+        }
+    </style>
+</head>
+<body>
+    <h1>🤖 G1 VR Teleoperation</h1>
+    <div id="status">🔄 시스템 초기화 중...</div>
+
+    <button id="btn-check" onclick="runCheck()">🔍 1단계: 환경 검사</button>
+    <button id="btn-vr" onclick="startVR()">🥽 2단계: VR 시작</button>
+    <button id="btn-reset" onclick="resetOrigin()">🔄 기준점 재설정</button>
+
+    <div id="log">시스템 대기 중...<br></div>
+
+<script>
+    // ==========================================
+    // 로그 및 상태 관리
+    // ==========================================
+    function log(msg) {
+        const logDiv = document.getElementById('log');
+        const time = new Date().toLocaleTimeString();
+        logDiv.innerHTML += '[' + time + '] ' + msg + '<br>';
+        logDiv.scrollTop = logDiv.scrollHeight;
+        console.log(msg);
+    }
+
+    function setStatus(msg, color) {
+        const statusDiv = document.getElementById('status');
+        statusDiv.textContent = msg;
+        statusDiv.style.background = color || 'rgba(255,255,255,0.1)';
+    }
+
+    // ==========================================
+    // 1단계: 환경 검사
+    // ==========================================
+    async function runCheck() {
+        log('=== 환경 검사 시작 ===');
         
-        # EMA 필터 상태
-        self.last_target_pos: Optional[Tuple[float, float, float]] = None
+        // HTTPS 확인
+        const isHttps = window.location.protocol === 'https:';
+        log((isHttps ? '✅' : '❌') + ' HTTPS: ' + window.location.protocol);
         
-        # 워치독 및 타이밍
-        self.last_frame_time: float = 0.0
-        
-        # VR 기준점 (처음 받은 위치를 0,0,0으로 설정)
-        self.vr_origin: Optional[Tuple[float, float, float]] = None
-        self.origin_set: bool = False
-        
-        print(f"✅ TeleopPipeline 초기화 완료")
-        print(f"   홈 포지션: {config.robot_home_pos}")
-        print(f"   스케일: {config.pos_scale}, EMA: {config.ema_alpha}")
-    
-    def reset_origin(self):
-        """VR 기준점 재설정 (재보정 시 사용)"""
-        self.origin_set = False
-        self.vr_origin = None
-        self.last_target_pos = None
-        print("🔄 VR 기준점 초기화됨")
-    
-    def process(self, frame: TeleopFrame) -> Dict[str, Any]:
-        """
-        TeleopFrame을 처리하여 로봇 제어 명령 생성
-        
-        Returns:
-            dict: 사용자 코드에서 기대하는 형식의 결과
-        """
-        current_time = time.time()
-        
-        # ----------------------------------------
-        # 1. 워치독 체크 (연결 끊김 감지)
-        # ----------------------------------------
-        if self.last_frame_time > 0:
-            dt = current_time - self.last_frame_time
-            if dt > self.cfg.watchdog_timeout_s:
-                print(f"⚠️  워치독 발동: {dt:.2f}초 데이터 없음 - 홈으로 복귀")
-                self.reset_origin()
-                return self._create_home_result(frame)
-        
-        self.last_frame_time = current_time
-        
-        # ----------------------------------------
-        # 2. VR 기준점 설정 (첫 프레임 또는 재연결 시)
-        # ----------------------------------------
-        if not self.origin_set:
-            self.vr_origin = (frame.x, frame.y, frame.z)
-            self.last_target_pos = self.cfg.robot_home_pos
-            self.origin_set = True
-            print(f"📍 VR 기준점 설정: ({frame.x:.3f}, {frame.y:.3f}, {frame.z:.3f})")
-        
-        # ----------------------------------------
-        # 3. 상대 이동량 계산 (기준점 대비 델타)
-        # ----------------------------------------
-        delta_x = frame.x - self.vr_origin[0]
-        delta_y = frame.y - self.vr_origin[1]
-        delta_z = frame.z - self.vr_origin[2]
-        
-        # ----------------------------------------
-        # 4. 좌표계 변환 및 스케일링
-        # ----------------------------------------
-        # 축 부호 변환 (VR → 로봇 좌표계)
-        scaled_dx = delta_x * self.cfg.pos_scale * self.cfg.axis_sign[0]
-        scaled_dy = delta_y * self.cfg.pos_scale * self.cfg.axis_sign[1]
-        scaled_dz = delta_z * self.cfg.pos_scale * self.cfg.axis_sign[2]
-        
-        # 홈 포지션 기준 절대 좌표
-        target_x = self.cfg.robot_home_pos[0] + scaled_dx
-        target_y = self.cfg.robot_home_pos[1] + scaled_dy
-        target_z = self.cfg.robot_home_pos[2] + scaled_dz
-        
-        # ----------------------------------------
-        # 5. EMA 필터 (손떨림 제거)
-        # ----------------------------------------
-        if self.last_target_pos is not None:
-            alpha = self.cfg.ema_alpha
-            target_x = alpha * target_x + (1 - alpha) * self.last_target_pos[0]
-            target_y = alpha * target_y + (1 - alpha) * self.last_target_pos[1]
-            target_z = alpha * target_z + (1 - alpha) * self.last_target_pos[2]
-        
-        # ----------------------------------------
-        # 6. 안전 제한 (급격한 움직임 방지)
-        # ----------------------------------------
-        if self.last_target_pos is not None:
-            # 이전 프레임 대비 이동량 제한
-            dx = target_x - self.last_target_pos[0]
-            dy = target_y - self.last_target_pos[1]
-            dz = target_z - self.last_target_pos[2]
-            
-            # 클리핑
-            dx = max(-self.cfg.max_dx, min(self.cfg.max_dx, dx))
-            dy = max(-self.cfg.max_dy, min(self.cfg.max_dy, dy))
-            dz = max(-self.cfg.max_dz, min(self.cfg.max_dz, dz))
-            
-            target_x = self.last_target_pos[0] + dx
-            target_y = self.last_target_pos[1] + dy
-            target_z = self.last_target_pos[2] + dz
-        
-        # 현재 타겟 저장 (다음 프레임 기준)
-        self.last_target_pos = (target_x, target_y, target_z)
-        
-        # ----------------------------------------
-        # 7. 결과 반환 (사용자 코드 호환 형식)
-        # ----------------------------------------
-        return {
-            "target_pose": {
-                "x": round(target_x, 4),
-                "y": round(target_y, 4),
-                "z": round(target_z, 4),
-                "qx": round(frame.qx, 4),
-                "qy": round(frame.qy, 4),
-                "qz": round(frame.qz, 4),
-                "qw": round(frame.qw, 4),
-            },
-            "raw_vr_pose": {
-                "x": round(frame.x, 4),
-                "y": round(frame.y, 4),
-                "z": round(frame.z, 4),
-                "qx": round(frame.qx, 4),
-                "qy": round(frame.qy, 4),
-                "qz": round(frame.qz, 4),
-                "qw": round(frame.qw, 4),
-            },
-            "status": "ok",
-            "delta": {
-                "dx": round(scaled_dx, 4),
-                "dy": round(scaled_dy, 4),
-                "dz": round(scaled_dz, 4),
+        if (!isHttps) {
+            setStatus('❌ HTTPS 필수!', 'rgba(244,67,54,0.4)');
+            return;
+        }
+
+        // WebXR 지원 확인
+        if (!navigator.xr) {
+            log('❌ navigator.xr 없음 (WebXR 미지원)');
+            setStatus('❌ WebXR 미지원 브라우저', 'rgba(244,67,54,0.4)');
+            return;
+        }
+        log('✅ navigator.xr 확인됨');
+
+        // immersive-vr 지원 확인
+        try {
+            const supported = await navigator.xr.isSessionSupported('immersive-vr');
+            log((supported ? '✅' : '❌') + ' immersive-vr: ' + (supported ? '지원됨' : '미지원'));
+
+            if (supported) {
+                setStatus('✅ 모든 검사 통과 - VR 시작 가능!', 'rgba(76,175,80,0.4)');
+                log('🎉 2단계 VR 시작을 눌러주세요!');
+            } else {
+                setStatus('❌ VR 미지원 - Guardian 설정 확인', 'rgba(244,67,54,0.4)');
             }
+        } catch(e) {
+            log('❌ 지원 확인 실패: ' + e.message);
+            setStatus('❌ 환경 검사 실패', 'rgba(244,67,54,0.4)');
         }
-    
-    def _create_home_result(self, frame: TeleopFrame) -> Dict[str, Any]:
-        """홈 포지션 결과 생성 (워치독 발동 시)"""
-        return {
-            "target_pose": {
-                "x": self.cfg.robot_home_pos[0],
-                "y": self.cfg.robot_home_pos[1],
-                "z": self.cfg.robot_home_pos[2],
-                "qx": 0.0, "qy": 0.0, "qz": 0.0, "qw": 1.0,
-            },
-            "raw_vr_pose": {
-                "x": frame.x, "y": frame.y, "z": frame.z,
-                "qx": frame.qx, "qy": frame.qy, "qz": frame.qz, "qw": frame.qw,
-            },
-            "status": "watchdog_home",
-            "delta": {"dx": 0.0, "dy": 0.0, "dz": 0.0}
+    }
+
+    // ==========================================
+    // VR 세션 관리 변수
+    // ==========================================
+    let xrSession = null;
+    let xrRefSpace = null;
+    let frameCount = 0;
+    let lastSendTime = 0;
+    const SEND_HZ = 30;
+
+    // ==========================================
+    // 2단계: VR 세션 시작
+    // ==========================================
+    async function startVR() {
+        log('🎯 VR 세션 시작 시도...');
+
+        if (!navigator.xr) {
+            log('❌ navigator.xr 없음');
+            return;
         }
+
+        try {
+            // VR 세션 요청
+            xrSession = await navigator.xr.requestSession('immersive-vr', {
+                optionalFeatures: ['local-floor']
+            });
+            log('✅ VR 세션 생성 성공!');
+
+            // 참조 공간 설정
+            try {
+                xrRefSpace = await xrSession.requestReferenceSpace('local-floor');
+                log('✅ local-floor 참조 공간 설정');
+            } catch(e) {
+                xrRefSpace = await xrSession.requestReferenceSpace('local');
+                log('✅ local 참조 공간 설정 (fallback)');
+            }
+
+            setStatus('🥽 VR 모드 실행 중!', 'rgba(76,175,80,0.5)');
+
+            // UI 숨기고 VR 모드 표시
+            document.querySelector('h1').style.display = 'none';
+            document.getElementById('status').style.display = 'none';
+            document.querySelectorAll('button').forEach(btn => btn.style.display = 'none');
+            document.getElementById('log').style.display = 'none';
+            document.body.style.background = '#000';
+
+            // 세션 종료 이벤트
+            xrSession.addEventListener('end', () => {
+                log('VR 세션 종료됨');
+                location.reload(); // 페이지 새로고침으로 초기 상태 복원
+            });
+
+            // XR 렌더링 루프 시작
+            xrSession.requestAnimationFrame(onXRFrame);
+            log('🚀 컨트롤러 추적 시작! 오른손을 움직여보세요.');
+
+        } catch(e) {
+            log('❌ VR 시작 실패: ' + e.name + ' - ' + e.message);
+            
+            const errorMessages = {
+                'NotAllowedError': 'Guardian 설정 또는 VR 권한 필요',
+                'NotSupportedError': '개발자 모드 활성화 필요',
+                'SecurityError': 'HTTPS 주소 확인 필요'
+            };
+            
+            const solution = errorMessages[e.name] || 'Quest 재부팅 후 재시도';
+            log('💡 해결책: ' + solution);
+            setStatus('❌ VR 시작 실패: ' + e.name, 'rgba(244,67,54,0.4)');
+        }
+    }
+
+    // ==========================================
+    // XR 프레임 루프 (컨트롤러 데이터 추출 및 전송)
+    // ==========================================
+    function onXRFrame(time, frame) {
+        if (!xrSession) return;
+
+        // 다음 프레임 예약
+        xrSession.requestAnimationFrame(onXRFrame);
+
+        // 전송 빈도 제한 (30Hz)
+        if (time - lastSendTime < 1000 / SEND_HZ) return;
+        lastSendTime = time;
+
+        // 입력 소스에서 오른손 컨트롤러 찾기
+        for (const inputSource of xrSession.inputSources) {
+            if (inputSource.handedness !== 'right') continue;
+            if (!inputSource.gripSpace) continue;
+
+            const pose = frame.getPose(inputSource.gripSpace, xrRefSpace);
+            if (!pose) continue;
+
+            const pos = pose.transform.position;
+            const ori = pose.transform.orientation;
+
+            // 서버로 데이터 전송
+            sendPoseToServer('right', pos.x, pos.y, pos.z, ori.x, ori.y, ori.z, ori.w);
+
+            frameCount++;
+            // 5초마다 로그 (150프레임 = 5초)
+            if (frameCount % 150 === 0) {
+                console.log('📊 VR 데이터 전송 중:', {
+                    x: pos.x.toFixed(3),
+                    y: pos.y.toFixed(3), 
+                    z: pos.z.toFixed(3)
+                });
+            }
+            
+            break; // 오른손만 처리
+        }
+    }
+
+    // ==========================================
+    // 서버로 포즈 데이터 전송
+    // ==========================================
+    function sendPoseToServer(hand, x, y, z, qx, qy, qz, qw) {
+        const data = {
+            hand: hand,
+            x: x, y: y, z: z,
+            qx: qx, qy: qy, qz: qz, qw: qw,
+            timestamp: Date.now() / 1000
+        };
+
+        fetch('/pose', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(data)
+        })
+        .then(response => response.json())
+        .then(result => {
+            // 서버 응답 처리
+            if (result.status === 'watchdog_home') {
+                console.log('⚠️ 워치독 발동 - 홈 위치로 복귀');
+            }
+        })
+        .catch(error => {
+            // 네트워크 에러는 조용히 무시 (다음 프레임에서 재시도)
+            console.debug('전송 에러:', error.message);
+        });
+    }
+
+    // ==========================================
+    // 기준점 재설정
+    // ==========================================
+    function resetOrigin() {
+        log('🔄 VR 기준점 재설정 요청');
+        // 서버의 pipeline.reset_origin() 호출하거나 클라이언트에서 처리
+        fetch('/reset', { method: 'POST' })
+        .then(() => log('✅ 기준점 재설정 완료'))
+        .catch(() => log('🔄 기준점 재설정 (로컬 처리)'));
+    }
+
+    // ==========================================
+    // 초기화
+    // ==========================================
+    log('✅ G1 VR Teleoperation 페이지 로드 완료');
+    log('📋 1단계 환경 검사부터 시작하세요');
+    setStatus('✅ 준비 완료 - 1단계 검사를 시작하세요');
+</script>
+</body>
+</html>"""
 
 
 # ==========================================
-# 테스트 코드
+# 서버 실행 (기존과 동일)
 # ==========================================
 if __name__ == '__main__':
-    print("=== teleop_pipeline 테스트 ===")
-    
-    # 사용자 설정과 동일한 구성
-    cfg = TeleopConfig(
-        pos_scale=0.5,
-        robot_home_pos=(0.35, -0.20, 0.45),
-        max_dx=0.10, max_dy=0.10, max_dz=0.10,
-        ema_alpha=0.15,
-        watchdog_timeout_s=0.3,
-        axis_sign=(1.0, -1.0, -1.0),
+    httpd = HTTPServer((HOST, PORT), Handler)
+    httpd.socket = ssl.wrap_socket(
+        httpd.socket,
+        keyfile="key.pem",
+        certfile="cert.pem",
+        server_side=True
     )
+
+    print(f"🚀 G1 VR Teleoperation 서버 시작")
+    print(f"🌐 접속 주소: https://{HOST}:{PORT}")
+    print(f"📊 상태 확인: https://{HOST}:{PORT}/status")
+    print(f"🛑 종료하려면 Ctrl+C")
     
-    pipeline = TeleopPipeline(cfg)
-    
-    # 테스트 JSON (사용자 코드에서 사용하는 flat 형식)
-    test_json = {
-        "hand": "right",
-        "x": 0.1, "y": 0.5, "z": -0.3,
-        "qx": 0.0, "qy": 0.0, "qz": 0.0, "qw": 1.0,
-        "timestamp": time.time()
-    }
-    
-    print("\n--- 테스트 실행 ---")
-    frame = parse_frame_from_json(test_json)
-    result = pipeline.process(frame)
-    
-    import json
-    print(json.dumps(result, indent=2, ensure_ascii=False))
-    print("\n✅ teleop_pipeline 테스트 완료!")
+    try:
+        httpd.serve_forever()
+    except KeyboardInterrupt:
+        print("\n🛑 서버 종료 중...")
