@@ -1,19 +1,129 @@
+#!/usr/bin/env python3
+"""
+Quest 3 HTTP POST + teleop_pipeline + ROS 2 통합 서버
+"""
+
 from http.server import HTTPServer, SimpleHTTPRequestHandler
 import ssl
 import json
+import threading
+import time
 
-from teleop_pipeline import (
-    TeleopConfig,
-    TeleopPipeline,
-    parse_frame_from_json,
-)
+# ROS 2 연동 (선택적 - 없어도 기본 기능 동작)
+try:
+    import rclpy
+    from rclpy.node import Node
+    from geometry_msgs.msg import PoseStamped
+    ROS2_AVAILABLE = True
+    print("✅ ROS 2 연동 준비 완료")
+except ImportError as e:
+    ROS2_AVAILABLE = False
+    print(f"⚠️  ROS 2 없이 실행: {e}")
+
+# teleop_pipeline 연동
+try:
+    from teleop_pipeline import TeleopConfig, TeleopPipeline, parse_frame_from_json
+    PIPELINE_AVAILABLE = True
+    print("✅ teleop_pipeline 로드 성공")
+except ImportError as e:
+    PIPELINE_AVAILABLE = False
+    print(f"❌ teleop_pipeline 로드 실패: {e}")
+    exit(1)
 
 HOST = "0.0.0.0"
 PORT = 8443
 
-# -----------------------------
-# Teleop pipeline 초기화
-# -----------------------------
+# ==========================================
+# ROS 2 노드 (G1 로봇용)
+# ==========================================
+class G1TeleopNode(Node):
+    def __init__(self):
+        super().__init__('g1_teleop_node')
+        
+        # G1 로봇을 위한 토픽 (IK 노드에서 구독할 예정)
+        self.target_pose_pub = self.create_publisher(
+            PoseStamped, '/g1/target_pose', 10
+        )
+        
+        # 원시 VR 데이터도 발행 (디버깅용)
+        self.vr_pose_pub = self.create_publisher(
+            PoseStamped, '/quest3/right_hand_pose', 10
+        )
+        
+        self.msg_count = 0
+        self.start_time = time.time()
+        self.get_logger().info("🤖 G1 Teleop Node 시작")
+        self.get_logger().info("📡 토픽: /g1/target_pose, /quest3/right_hand_pose")
+
+    def publish_from_pipeline_result(self, result):
+        """teleop_pipeline 결과를 ROS 2 메시지로 변환"""
+        try:
+            # 파이프라인에서 처리된 최종 목표 좌표
+            if 'target_pose' in result:
+                target = result['target_pose']
+                msg = PoseStamped()
+                msg.header.stamp = self.get_clock().now().to_msg()
+                msg.header.frame_id = 'g1_base_link'
+                
+                msg.pose.position.x = float(target.get('x', 0))
+                msg.pose.position.y = float(target.get('y', 0))
+                msg.pose.position.z = float(target.get('z', 0))
+                
+                # 회전은 기본값 또는 파이프라인 결과 사용
+                msg.pose.orientation.x = float(target.get('qx', 0))
+                msg.pose.orientation.y = float(target.get('qy', 0))
+                msg.pose.orientation.z = float(target.get('qz', 0))
+                msg.pose.orientation.w = float(target.get('qw', 1))
+                
+                self.target_pose_pub.publish(msg)
+                
+            # 원시 VR 데이터도 발행 (필요시)
+            if 'raw_vr_pose' in result:
+                raw = result['raw_vr_pose']
+                vr_msg = PoseStamped()
+                vr_msg.header.stamp = self.get_clock().now().to_msg()
+                vr_msg.header.frame_id = 'quest3_world'
+                
+                vr_msg.pose.position.x = float(raw.get('x', 0))
+                vr_msg.pose.position.y = float(raw.get('y', 0))
+                vr_msg.pose.position.z = float(raw.get('z', 0))
+                vr_msg.pose.orientation.x = float(raw.get('qx', 0))
+                vr_msg.pose.orientation.y = float(raw.get('qy', 0))
+                vr_msg.pose.orientation.z = float(raw.get('qz', 0))
+                vr_msg.pose.orientation.w = float(raw.get('qw', 1))
+                
+                self.vr_pose_pub.publish(vr_msg)
+                
+            self.msg_count += 1
+            
+            # 통계 출력
+            if self.msg_count % 150 == 0:  # 5초마다 (30Hz 기준)
+                elapsed = time.time() - self.start_time
+                rate = self.msg_count / elapsed if elapsed > 0 else 0
+                self.get_logger().info(f"📊 {self.msg_count}개 메시지, 평균 {rate:.1f}Hz")
+                
+        except Exception as e:
+            self.get_logger().error(f"ROS 발행 에러: {e}")
+
+# 전역 ROS 노드
+ros_node = None
+
+def ros_spin_thread():
+    """ROS 2 노드를 별도 스레드에서 실행"""
+    global ros_node
+    rclpy.init()
+    ros_node = G1TeleopNode()
+    try:
+        rclpy.spin(ros_node)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        ros_node.destroy_node()
+        rclpy.shutdown()
+
+# ==========================================
+# Teleop pipeline 초기화 (기존 설정 유지)
+# ==========================================
 cfg = TeleopConfig(
     pos_scale=0.5,
     robot_home_pos=(0.35, -0.20, 0.45),
@@ -27,8 +137,10 @@ cfg = TeleopConfig(
 
 pipeline = TeleopPipeline(cfg)
 
-
-class Handler(SimpleHTTPRequestHandler):
+# ==========================================
+# HTTP 핸들러 (기존 로직 + ROS 2 추가)
+# ==========================================
+class TeleopHandler(SimpleHTTPRequestHandler):
     def do_POST(self):
         if self.path == "/pose":
             length = int(self.headers.get("Content-Length", "0"))
@@ -37,26 +149,34 @@ class Handler(SimpleHTTPRequestHandler):
             try:
                 data = json.loads(raw.decode("utf-8"))
 
-                # 1) Quest JSON -> TeleopFrame
+                # 1) Quest JSON -> TeleopFrame (기존 로직)
                 frame = parse_frame_from_json(data)
 
-                # 2) Teleop pipeline 실행
+                # 2) Teleop pipeline 실행 (기존 로직)
                 result = pipeline.process(frame)
 
-                # 3) 서버 로그 출력
+                # 3) 서버 로그 출력 (기존 로직)
                 print("\n=== TELEOP RESULT ===")
                 print(json.dumps(result, indent=2, ensure_ascii=False))
 
-                # 4) 브라우저에 응답
+                # 4) ⭐️ ROS 2로 발행 (새로 추가된 기능)
+                if ROS2_AVAILABLE and ros_node:
+                    ros_node.publish_from_pipeline_result(result)
+
+                # 5) 브라우저에 응답 (기존 로직)
                 response = json.dumps(result).encode("utf-8")
                 self.send_response(200)
                 self.send_header("Content-Type", "application/json")
                 self.send_header("Content-Length", str(len(response)))
+                self.send_header("Access-Control-Allow-Origin", "*")
                 self.end_headers()
                 self.wfile.write(response)
 
             except Exception as e:
                 print("POST parse/process error:", e)
+                import traceback
+                traceback.print_exc()
+                
                 err = json.dumps({"ok": False, "error": str(e)}).encode("utf-8")
                 self.send_response(500)
                 self.send_header("Content-Type", "application/json")
@@ -68,14 +188,61 @@ class Handler(SimpleHTTPRequestHandler):
             self.send_response(404)
             self.end_headers()
 
+    def do_GET(self):
+        """상태 확인 API"""
+        if self.path == "/status":
+            status = {
+                'server': 'running',
+                'ros2_available': ROS2_AVAILABLE,
+                'ros2_connected': ros_node is not None,
+                'pipeline_available': PIPELINE_AVAILABLE,
+                'message_count': ros_node.msg_count if ros_node else 0
+            }
+            response = json.dumps(status, indent=2).encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(response)))
+            self.end_headers()
+            self.wfile.write(response)
+        else:
+            super().do_GET()
 
-httpd = HTTPServer((HOST, PORT), Handler)
-httpd.socket = ssl.wrap_socket(
-    httpd.socket,
-    keyfile="key.pem",
-    certfile="cert.pem",
-    server_side=True
-)
+    def do_OPTIONS(self):
+        """CORS 처리"""
+        self.send_response(200)
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Access-Control-Allow-Methods", "POST, GET, OPTIONS")
+        self.send_header("Access-Control-Allow-Headers", "Content-Type")
+        self.end_headers()
 
-print(f"Serving on https://192.168.123.233:{PORT}")
-httpd.serve_forever()
+# ==========================================
+# 메인 실행
+# ==========================================
+if __name__ == '__main__':
+    print("🚀 G1 VR Teleoperation 통합 서버 시작")
+    
+    # ROS 2 노드를 백그라운드에서 실행
+    if ROS2_AVAILABLE:
+        ros_thread = threading.Thread(target=ros_spin_thread, daemon=True)
+        ros_thread.start()
+        time.sleep(2)  # ROS 노드 초기화 대기
+        print("✅ ROS 2 노드 시작 완료")
+
+    # HTTPS 서버 실행 (기존 방식 유지)
+    httpd = HTTPServer((HOST, PORT), TeleopHandler)
+    httpd.socket = ssl.wrap_socket(
+        httpd.socket,
+        keyfile="key.pem",
+        certfile="cert.pem",
+        server_side=True
+    )
+
+    print(f"🌐 서버 주소: https://{HOST}:{PORT}")
+    print(f"📊 상태 확인: https://{HOST}:{PORT}/status")
+    print(f"📡 ROS 2 토픽: /g1/target_pose")
+    print(f"🛑 종료하려면 Ctrl+C")
+    
+    try:
+        httpd.serve_forever()
+    except KeyboardInterrupt:
+        print("\n🛑 서버 종료 중...")
