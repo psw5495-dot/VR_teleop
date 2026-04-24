@@ -1,47 +1,17 @@
-document.getElementById('btn-vr').addEventListener('click', async () => {
-    log('🎯 VR 버튼 클릭 감지됨!', 'ok');
-    
-    // Guardian 상태 간접 확인
-    if (!navigator.xr) {
-        log('❌ navigator.xr 없음 - WebXR 미지원', 'err');
-        return;
-    }
-    
-    try {
-        // 지원 여부 재확인
-        const supported = await navigator.xr.isSessionSupported('immersive-vr');
-        log(`immersive-vr 지원: ${supported}`, supported ? 'ok' : 'err');
-        
-        if (!supported) {
-            log('💡 Guardian 설정이 안 되어 있을 가능성이 높습니다', 'warn');
-            return;
-        }
-        
-        // 최소 옵션으로 세션 시작 시도
-        log('VR 세션 시작 시도 중...', 'info');
-        const session = await navigator.xr.requestSession('immersive-vr');
-        
-        log('✅ VR 세션 생성 성공!', 'ok');
-        await renderer.xr.setSession(session);
-        log('✅ 렌더러 연결 완료 - VR 모드 진입!', 'ok');
-        
-        // UI 숨기기
-        document.getElementById('container').style.display = 'none';
-        renderer.domElement.style.display = 'block';
-        
-    } catch (error) {
-        log(`❌ VR 세션 실패: ${error.name}`, 'err');
-        log(`상세 메시지: ${error.message}`, 'err');
-        
-        // 에러별 구체적 해결책
-        const solutions = {
-            'NotAllowedError': '🔧 Guardian 설정 또는 VR 권한 허용 필요',
-            'NotSupportedError': '🔧 개발자 모드 활성화 또는 Guardian 설정 필요',
-            'SecurityError': '🔧 HTTPS 주소 확인 (https://로 시작하는지)',
-            'InvalidStateError': '🔧 Quest 브라우저 완전 재시작 필요'
-        };
-        
-        const solution = solutions[error.name] || '🔧 Quest 재부팅 후 재시도';
-        log(solution, 'warn');
-    }
-});
+Traceback (most recent call last):
+  File "/home/lgit/TeleVision/serve_webxr.py", line 2, in <module>
+    import rclpy
+  File "/opt/ros/humble/local/lib/python3.10/dist-packages/rclpy/__init__.py", line 49, in <module>
+    from rclpy.signals import install_signal_handlers
+  File "/opt/ros/humble/local/lib/python3.10/dist-packages/rclpy/signals.py", line 15, in <module>
+    from rclpy.exceptions import InvalidHandle
+  File "/opt/ros/humble/local/lib/python3.10/dist-packages/rclpy/exceptions.py", line 15, in <module>
+    from rclpy.impl.implementation_singleton import rclpy_implementation as _rclpy
+  File "/opt/ros/humble/local/lib/python3.10/dist-packages/rclpy/impl/implementation_singleton.py", line 32, in <module>
+    rclpy_implementation = import_c_library('._rclpy_pybind11', package)
+  File "/opt/ros/humble/lib/python3.10/site-packages/rpyutils/import_c_library.py", line 39, in import_c_library
+    return importlib.import_module(name, package=package)
+  File "/usr/lib/python3.10/importlib/__init__.py", line 126, in import_module
+    return _bootstrap._gcd_import(name[level:], package, level)
+ImportError: librcl_action.so: cannot open shared object file: No such file or directory
+The C extension '/opt/ros/humble/local/lib/python3.10/dist-packages/rclpy/_rclpy_pybind11.cpython-310-x86_64-linux-gnu.so' failed to be imported while being present on the system. Please refer to 'https://docs.ros.org/en/{distro}/Guides/Installation-Troubleshooting.html#import-failing-even-with-library-present-on-the-system' for possible solutions
