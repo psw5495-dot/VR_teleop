@@ -1,13 +1,15 @@
 
-Terminal1: vr server
+#Terminal1: vr server
 cd ~/TeleVision
 source /opt/ros/humble/setup.bash
 export LD_PRELOAD=/usr/lib/x86_64-linux-gnu/libstdc++.so.6
 export PYTHONPATH=/opt/ros/humble/local/lib/python3.10/dist-packages:/opt/ros/humble/lib/python3.10/site-packages:$(pwd):$PYTHONPATH
 source tv_env/bin/activate
 
+python serve_webxr.py
 
-Terminal2: ik node
+
+#Terminal2: ik node
 cd ~/TeleVision
 source /opt/ros/humble/setup.bash
 export LD_PRELOAD=/usr/lib/x86_64-linux-gnu/libstdc++.so.6
@@ -17,7 +19,7 @@ source tv_env/bin/activate
 python g1_ik_node.py
 
 
-Terminal3: data flow
+#Terminal3: data flow
 source /opt/ros/humble/setup.bash
 
 # VR → ROS 2 토픽 확인
