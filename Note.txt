@@ -1,14 +1,9 @@
+# 기존 설치 확인
+ls ~/ros2_ws/src/unitree_ros2 2>/dev/null && echo "✅ 있음" || echo "❌ 설치 필요"
 
-
-
-if __name__ == '__main__':
-    print("🚀 G1 VR Teleoperation 서버 시작")
-    
-    # ROS 2 백그라운드 실행
-    if ROS2_AVAILABLE:
-        ros_thread = threading.Thread(target=ros_spin_thread, daemon=True)
-        ros_thread.start()
-        time.sleep(2)  # ROS 노드 초기화 대기
-        print("✅ ROS 2 노드 시작 완료")
-    
-    # 기존 HTTP 서버 코드...
+# 없으면 설치
+cd ~/ros2_ws/src
+git clone https://github.com/unitreerobotics/unitree_ros2.git
+cd ~/ros2_ws
+colcon build --packages-select unitree_ros2
+source install/setup.bash
