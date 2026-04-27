@@ -8,6 +8,11 @@ git clone https://github.com/unitreerobotics/unitree_ros2.git temp_repo
 
 # URDF 및 메쉬 파일 복사
 cp -r temp_repo/robots/g1_description/* .
+
+cp: cannot stat 'temp_repo/robots/g1_description/*': No such file or directory
+
+
+
 rm -rf temp_repo
 
 # 파일 확인
