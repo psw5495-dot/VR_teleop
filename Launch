@@ -7,7 +7,7 @@ export LD_LIBRARY_PATH=/opt/ros/humble/lib:$LD_LIBRARY_PATH
 export PYTHONPATH=/opt/ros/humble/local/lib/python3.10/dist-packages:/opt/ros/humble/lib/python3.10/site-packages:$(pwd):$PYTHONPATH
 source tv_env/bin/activate
 
-python vr_teleop_server.py
+python serve_webxr.py
 
 
 Terminal2: ik node
