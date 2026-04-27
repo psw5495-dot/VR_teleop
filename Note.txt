@@ -1,9 +1,3 @@
-result = pipeline.process(frame)
-
-# ⭐️ ROS 2로 좌표 발행
-if ROS2_AVAILABLE and ros_publisher:
-    ros_publisher.publish_poses(result)
-
 
 
 
