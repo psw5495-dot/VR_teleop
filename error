@@ -1,5 +1,8 @@
-[ERROR] [1777253731.003735834] [g1_ik_node]: ❌ G1 URDF 파일을 찾을 수 없습니다!
-[ERROR] [1777253731.003938747] [g1_ik_node]: 다음 중 하나의 경로에 g1.urdf 파일이 있어야 합니다:
-[ERROR] [1777253731.004084765] [g1_ik_node]:   - /home/lgit/ros2_ws/src/unitree_ros2/robots/g1_description/urdf/g1.urdf
-[ERROR] [1777253731.004226751] [g1_ik_node]:   - /opt/ros/humble/share/g1_description/urdf/g1.urdf
-[ERROR] [1777253731.004367501] [g1_ik_node]:   - /home/lgit/TeleVision/models/g1/g1.urdf
+# 시스템 전체에서 G1 URDF 파일 찾기
+find ~ -name "*g1*.urdf" 2>/dev/null
+find ~ -name "*unitree*.urdf" 2>/dev/null
+
+# ros2_ws에서 구체적 탐색
+cd ~/ros2_ws/src
+find . -name "*.urdf" | grep -i g1
+find . -name "*.urdf.xacro" | grep -i g1
