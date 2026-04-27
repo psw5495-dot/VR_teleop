@@ -1,0 +1,40 @@
+
+Terminal1: vr server
+cd ~/TeleVision
+source /opt/ros/humble/setup.bash
+export LD_PRELOAD=/usr/lib/x86_64-linux-gnu/libstdc++.so.6
+export LD_LIBRARY_PATH=/opt/ros/humble/lib:$LD_LIBRARY_PATH
+export PYTHONPATH=/opt/ros/humble/local/lib/python3.10/dist-packages:/opt/ros/humble/lib/python3.10/site-packages:$(pwd):$PYTHONPATH
+source tv_env/bin/activate
+
+python vr_teleop_server.py
+
+
+Terminal2: ik node
+cd ~/TeleVision
+source /opt/ros/humble/setup.bash
+export LD_PRELOAD=/usr/lib/x86_64-linux-gnu/libstdc++.so.6
+export PYTHONPATH=/opt/ros/humble/local/lib/python3.10/dist-packages:/opt/ros/humble/lib/python3.10/site-packages:$(pwd):$PYTHONPATH
+source tv_env/bin/activate
+
+python g1_ik_node.py
+
+
+Terminal3: data flow
+source /opt/ros/humble/setup.bash
+
+# VR 좌표가 ROS 토픽으로 나오는지 확인
+ros2 topic echo /g1/target_pose
+
+# IK 계산 결과 확인
+ros2 topic echo /g1/arm/joint_commands
+
+
+Terminal4: G1 connection
+source /opt/ros/humble/setup.bash
+source ~/ros2_ws/install/setup.bash
+
+# G1 드라이버 실행
+ros2 launch unitree_ros2 g1_bringup.launch.py
+
+
