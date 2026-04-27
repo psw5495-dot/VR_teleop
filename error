@@ -7,6 +7,10 @@ git clone https://github.com/unitreerobotics/unitree_mujoco.git
 
 # 3. G1 URDF 및 메쉬 파일 복사
 cp -r unitree_mujoco/data/g1/* .
+cp: cannot stat 'unitree_mujoco/data/g1/*': No such file or directory
+
+
+
 
 # 4. 임시 저장소 삭제 (용량 절약)
 rm -rf unitree_mujoco
