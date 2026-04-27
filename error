@@ -1,10 +1,8 @@
-/home/unitree/xr_teleoperate/assets/h1/h1_with_hand.urdf
-/home/unitree/xr_teleoperate/assets/unitree_hand/unitree_dex3_left.urdf
-/home/unitree/xr_teleoperate/assets/unitree_hand/unitree_dex3_right.urdf
-/home/unitree/xr_teleoperate/assets/g1/g1_body29_hand14.urdf
-/home/unitree/xr_teleoperate/assets/g1/g1_body23.urdf
-/home/unitree/xr_teleoperate/assets/inspire_hand/inspire_hand_right.urdf
-/home/unitree/xr_teleoperate/assets/inspire_hand/inspire_hand_left.urdf
-/home/unitree/xr_teleoperate/assets/h1_2/h1_2.urdf
-/home/unitree/xr_teleoperate/assets/brainco_hand/brainco_left.urdf
-/home/unitree/xr_teleoperate/assets/brainco_hand/brainco_right.urdf
+# 1. 모델 저장 폴더 준비
+mkdir -p ~/TeleVision/models
+
+# 2. G1 로봇에서 전체 g1 폴더 복사 (매우 중요!)
+scp -r unitree@192.168.123.26:/home/unitree/xr_teleoperate/assets/g1 ~/TeleVision/models/
+
+# 3. 복사 성공 확인
+ls -la ~/TeleVision/models/g1/
