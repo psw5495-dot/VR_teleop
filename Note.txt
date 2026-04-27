@@ -1,9 +1,293 @@
-# 기존 설치 확인
-ls ~/ros2_ws/src/unitree_ros2 2>/dev/null && echo "✅ 있음" || echo "❌ 설치 필요"
+#!/usr/bin/env python3
+"""
+G1 로봇 팔 역기구학(IK) 제어 노드
+VR 목표 좌표를 G1 관절 각도로 변환하여 실제 로봇 제어
+"""
 
-# 없으면 설치
-cd ~/ros2_ws/src
-git clone https://github.com/unitreerobotics/unitree_ros2.git
-cd ~/ros2_ws
-colcon build --packages-select unitree_ros2
-source install/setup.bash
+import rclpy
+from rclpy.node import Node
+from geometry_msgs.msg import PoseStamped
+from sensor_msgs.msg import JointState
+import numpy as np
+import pinocchio as pin
+import os
+import time
+import threading
+
+class G1IKNode(Node):
+    def __init__(self):
+        super().__init__('g1_ik_node')
+        
+        # ----------------------------------------
+        # 1. Pinocchio 모델 로드
+        # ----------------------------------------
+        self.setup_pinocchio_model()
+        
+        # ----------------------------------------
+        # 2. ROS 2 토픽 설정
+        # ----------------------------------------
+        # VR에서 오는 목표 좌표 구독
+        self.target_sub = self.create_subscription(
+            PoseStamped,
+            '/g1/target_pose',
+            self.target_callback,
+            10
+        )
+        
+        # G1 현재 상태 구독 (IK 초기값용)
+        self.joint_sub = self.create_subscription(
+            JointState,
+            '/joint_states',
+            self.joint_state_callback,
+            10
+        )
+        
+        # G1 관절 명령 발행
+        self.joint_pub = self.create_publisher(
+            JointState,
+            '/g1/arm/joint_commands',
+            10
+        )
+        
+        # ----------------------------------------
+        # 3. 상태 변수 초기화
+        # ----------------------------------------
+        self.current_q = pin.neutral(self.model)
+        self.is_robot_ready = False
+        self.emergency_stop = False
+        self.last_ik_time = time.time()
+        
+        # 안전 제한
+        self.max_joint_velocity = 0.5  # rad/s
+        self.ik_timeout = 0.1  # 100ms 내에 IK 완료되어야 함
+        
+        # 작업 공간 제한 (G1 베이스 기준, 단위: m)
+        self.workspace_limits = {
+            'x_min': 0.2, 'x_max': 0.8,
+            'y_min': -0.5, 'y_max': 0.5,
+            'z_min': 0.3, 'z_max': 1.2
+        }
+        
+        # 키보드 모니터링 스레드 (비상 정지용)
+        self.keyboard_thread = threading.Thread(target=self.keyboard_monitor, daemon=True)
+        self.keyboard_thread.start()
+        
+        self.get_logger().info('🤖 G1 IK 노드 시작!')
+        self.get_logger().info('📡 /g1/target_pose 구독 대기 중...')
+        self.get_logger().info('⚠️ 스페이스바를 누르면 비상 정지됩니다')
+
+    def setup_pinocchio_model(self):
+        """Pinocchio 모델 설정"""
+        # URDF 파일 경로 탐색
+        urdf_candidates = [
+            os.path.expanduser('~/ros2_ws/src/unitree_ros2/robots/g1_description/urdf/g1.urdf'),
+            '/opt/ros/humble/share/g1_description/urdf/g1.urdf',
+            os.path.join(os.path.dirname(__file__), 'models', 'g1', 'g1.urdf'),
+        ]
+        
+        urdf_path = None
+        for path in urdf_candidates:
+            if os.path.exists(path):
+                urdf_path = path
+                break
+        
+        if not urdf_path:
+            self.get_logger().error('❌ G1 URDF 파일을 찾을 수 없습니다!')
+            self.get_logger().error('다음 중 하나의 경로에 g1.urdf 파일이 있어야 합니다:')
+            for path in urdf_candidates:
+                self.get_logger().error(f'  - {path}')
+            exit(1)
+        
+        try:
+            self.model = pin.buildModelFromUrdf(urdf_path)
+            self.data = self.model.createData()
+            self.get_logger().info(f'✅ G1 URDF 로드 성공: {urdf_path}')
+        except Exception as e:
+            self.get_logger().error(f'❌ URDF 로드 실패: {e}')
+            exit(1)
+        
+        # End-effector 프레임 ID 설정
+        # (실제 G1 URDF의 프레임 이름으로 수정 필요)
+        ee_candidates = ['right_end_effector', 'right_wrist_roll_link', 'right_hand_link']
+        self.ee_frame_id = None
+        
+        for ee_name in ee_candidates:
+            try:
+                self.ee_frame_id = self.model.getFrameId(ee_name)
+                self.get_logger().info(f'✅ End-effector 프레임: {ee_name}')
+                break
+            except:
+                continue
+        
+        if self.ee_frame_id is None:
+            self.get_logger().warn('⚠️ End-effector 프레임을 찾을 수 없음. 첫 번째 프레임 사용')
+            self.ee_frame_id = 1
+
+    def keyboard_monitor(self):
+        """키보드 입력 모니터링 (비상 정지)"""
+        try:
+            while rclpy.ok():
+                key = input().strip().lower()
+                if key in [' ', 'stop', 'emergency']:
+                    self.emergency_stop = True
+                    self.get_logger().warn('🛑 비상 정지 활성화!')
+                elif key in ['start', 'resume']:
+                    self.emergency_stop = False
+                    self.get_logger().info('▶️ 운전 재개')
+        except:
+            pass
+
+    def joint_state_callback(self, msg):
+        """G1 현재 관절 상태 업데이트"""
+        if not self.is_robot_ready:
+            self.is_robot_ready = True
+            self.get_logger().info('✅ G1 관절 상태 수신 시작!')
+        
+        # 현재 관절 각도를 IK 초기값으로 업데이트
+        # (실제 G1 관절 순서에 맞게 매핑 필요)
+        try:
+            if len(msg.position) >= 7:
+                # 오른팔 7개 관절만 추출 (인덱스는 실제 G1에 맞게 수정)
+                self.current_q[:7] = msg.position[:7]
+        except Exception as e:
+            self.get_logger().debug(f'관절 상태 업데이트 에러: {e}')
+
+    def check_workspace_limits(self, target_pos):
+        """작업 공간 제한 확인"""
+        x, y, z = target_pos
+        
+        if not (self.workspace_limits['x_min'] <= x <= self.workspace_limits['x_max']):
+            return False
+        if not (self.workspace_limits['y_min'] <= y <= self.workspace_limits['y_max']):
+            return False
+        if not (self.workspace_limits['z_min'] <= z <= self.workspace_limits['z_max']):
+            return False
+        
+        return True
+
+    def solve_ik_safe(self, target_pos):
+        """안전한 IK 계산 (타임아웃 포함)"""
+        start_time = time.time()
+        
+        q = self.current_q.copy()
+        target_se3 = pin.SE3(np.eye(3), target_pos)
+        
+        # IK 파라미터
+        eps = 1e-4
+        max_iter = 50
+        dt = 0.1
+        damping = 1e-6
+        
+        for i in range(max_iter):
+            # 타임아웃 체크
+            if time.time() - start_time > self.ik_timeout:
+                self.get_logger().warn('⚠️ IK 계산 타임아웃')
+                return None
+            
+            # Forward Kinematics
+            pin.forwardKinematics(self.model, self.data, q)
+            pin.updateFramePlacements(self.model, self.data)
+            
+            # 현재 end-effector 위치
+            current_se3 = self.data.oMf[self.ee_frame_id]
+            pos_error = target_pos - current_se3.translation
+            
+            # 수렴 확인
+            if np.linalg.norm(pos_error) < eps:
+                return q
+            
+            # Jacobian 계산
+            J_full = pin.computeFrameJacobian(
+                self.model, self.data, q, self.ee_frame_id,
+                pin.ReferenceFrame.LOCAL_WORLD_ALIGNED
+            )
+            J_pos = J_full[:3, :]  # 위치만 사용
+            
+            # Damped Least Squares
+            JJT = J_pos @ J_pos.T
+            dq = J_pos.T @ np.linalg.solve(JJT + damping * np.eye(3), pos_error)
+            
+            # 관절 각도 업데이트
+            q = q + dt * dq
+            
+            # 관절 한계 적용
+            q = np.clip(q, self.model.lowerPositionLimit, self.model.upperPositionLimit)
+        
+        self.get_logger().debug('IK 수렴 실패 (최대 반복 도달)')
+        return q  # 근사해라도 반환
+
+    def target_callback(self, msg):
+        """VR 목표 좌표 처리"""
+        if self.emergency_stop:
+            return
+        
+        if not self.is_robot_ready:
+            self.get_logger().warn('⚠️ G1 아직 준비되지 않음')
+            return
+        
+        try:
+            # 목표 위치 추출
+            target_pos = np.array([
+                msg.pose.position.x,
+                msg.pose.position.y,
+                msg.pose.position.z
+            ])
+            
+            # 작업 공간 제한 확인
+            if not self.check_workspace_limits(target_pos):
+                self.get_logger().warn('⚠️ 목표 위치가 작업 공간을 벗어남')
+                return
+            
+            # IK 계산
+            q_target = self.solve_ik_safe(target_pos)
+            
+            if q_target is not None:
+                self.publish_joint_command(q_target)
+                self.current_q = q_target  # 다음 계산의 초기값으로 저장
+            
+        except Exception as e:
+            self.get_logger().error(f'목표 좌표 처리 에러: {e}')
+
+    def publish_joint_command(self, q):
+        """안전한 관절 명령 발행"""
+        msg = JointState()
+        msg.header.stamp = self.get_clock().now().to_msg()
+        
+        # ⚠️ 중요: 실제 G1 관절 이름으로 수정 필요!
+        msg.name = [
+            'right_shoulder_pitch_joint',
+            'right_shoulder_roll_joint',
+            'right_shoulder_yaw_joint',
+            'right_elbow_pitch_joint',
+            'right_wrist_roll_joint',
+            'right_wrist_pitch_joint',
+            'right_wrist_yaw_joint'
+        ]
+        
+        # 오른팔 7개 관절 각도
+        msg.position = q[:7].tolist()
+        
+        # 속도는 0으로 (위치 제어)
+        msg.velocity = [0.0] * 7
+        
+        self.joint_pub.publish(msg)
+        
+        # 로그 출력 제한 (1초에 1번)
+        now = time.time()
+        if now - self.last_ik_time > 1.0:
+            self.get_logger().info(f'IK 성공 → 관절 명령 전송')
+            self.last_ik_time = now
+
+def main():
+    rclpy.init()
+    node = G1IKNode()
+    try:
+        rclpy.spin(node)
+    except KeyboardInterrupt:
+        node.get_logger().info('🛑 G1 IK 노드 종료')
+    finally:
+        node.destroy_node()
+        rclpy.shutdown()
+
+if __name__ == '__main__':
+    main()
