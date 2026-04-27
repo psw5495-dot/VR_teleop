@@ -1,34 +1,5 @@
-# TeleVision 폴더에 모델 디렉토리 생성
-cd ~/TeleVision
-mkdir -p models/g1
+# G1에서 URDF 파일 찾기
+ssh unitree@192.168.123.26 "find /opt -name '*g1*.urdf' 2>/dev/null"
 
-# Unitree 공식 저장소에서 G1 모델 다운로드
-cd models/g1
-git clone https://github.com/unitreerobotics/unitree_ros2.git temp_repo
-
-# URDF 및 메쉬 파일 복사
-cp -r temp_repo/robots/g1_description/* .
-
-# 1. 모델 폴더로 이동 및 정리
-cd ~/TeleVision/models/g1
-rm -rf temp_repo  # 실패한 임시 폴더 삭제
-
-# 2. G1 모델이 확실히 포함된 공식 저장소 다운로드
-git clone https://github.com/unitreerobotics/unitree_mujoco.git
-
-# 3. G1 URDF 및 메쉬 파일 복사
-cp -r unitree_mujoco/data/g1/* .
-
-# 4. 임시 저장소 삭제 (용량 절약)
-rm -rf unitree_mujoco
-
-# 5. 성공 확인
-ls -la g1.urdf
-
-
-
-
-rm -rf temp_repo
-
-# 파일 확인
-ls -la urdf/g1.urdf
+# 발견된 파일 복사 (예시)
+scp unitree@192.168.123.26:/opt/ros/humble/share/g1_description/urdf/g1.urdf ~/TeleVision/models/g1/
