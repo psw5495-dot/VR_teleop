@@ -7,3 +7,14 @@ if ROS2_AVAILABLE and ros_publisher:
 
 
 
+if __name__ == '__main__':
+    print("🚀 G1 VR Teleoperation 서버 시작")
+    
+    # ROS 2 백그라운드 실행
+    if ROS2_AVAILABLE:
+        ros_thread = threading.Thread(target=ros_spin_thread, daemon=True)
+        ros_thread.start()
+        time.sleep(2)  # ROS 노드 초기화 대기
+        print("✅ ROS 2 노드 시작 완료")
+    
+    # 기존 HTTP 서버 코드...
