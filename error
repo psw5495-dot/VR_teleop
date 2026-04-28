@@ -1,15 +1,10 @@
-# LowCmd_ 임포트 부분만 수정
-try:
-    from unitree_sdk2py.idl.unitree_hg.msg.dds_ import LowCmd_
-    print("✅ LowCmd_ 로드: unitree_hg 경로")
-except ImportError:
-    try:
-        from unitree_sdk2py.idl.unitree_go.msg.dds_ import LowCmd_
-        print("✅ LowCmd_ 로드: unitree_go 경로")
-    except ImportError:
-        try:
-            from unitree_sdk2py.idl.default import unitree_hg_msg_dds__LowCmd_ as LowCmd_
-            print("✅ LowCmd_ 로드: default 경로")
-        except ImportError as e:
-            print(f"❌ LowCmd_ 로드 실패: {e}")
-            SDK_AVAILABLE = False
+(tv_env) (base) lgit@lgit-17Z90R-EP7NL:~/TeleVision$ python3 g1_bridge_node.py
+✅ LowCmd_ 로드: unitree_hg 경로
+Traceback (most recent call last):
+  File "/home/lgit/TeleVision/g1_bridge_node.py", line 187, in <module>
+    main()
+  File "/home/lgit/TeleVision/g1_bridge_node.py", line 177, in main
+    node = G1BridgeNode()
+  File "/home/lgit/TeleVision/g1_bridge_node.py", line 44, in __init__
+    if SDK_AVAILABLE:
+NameError: name 'SDK_AVAILABLE' is not defined
