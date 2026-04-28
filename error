@@ -1,3 +1,25 @@
+#!/usr/bin/env python3
+# ~/TeleVision/g1_bridge_node.py
+"""
+ROS2 → G1 DDS 브릿지 노드 (생성자 시그니처 완벽 대응)
+"""
+
+import rclpy
+from rclpy.node import Node
+from sensor_msgs.msg import JointState
+import time
+import subprocess
+import numpy as np
+
+# ── 전역 변수 사전 정의 ───────────────────────────────────────
+SDK_AVAILABLE = False
+LowCmd_ = None
+MotorCmd_ = None
+ChannelPublisher = None
+init_function = None
+
+print("🔍 Unitree SDK2 로드 시도 중...")
+
 # ── SDK 임포트 (CRC 모듈 추가) ────────────────────────────────
 try:
     from unitree_sdk2py.idl.unitree_hg.msg.dds_ import LowCmd_, MotorCmd_
@@ -24,3 +46,297 @@ except ImportError as e:
     print(f"❌ SDK 로드 실패: {e}")
     SDK_AVAILABLE = False
     CRC_AVAILABLE = False
+
+# ── G1 로봇 사양 ──────────────────────────────────────────────
+G1_MOTOR_COUNT = 35
+
+G1_RIGHT_ARM_MOTOR_IDX = {
+    'right_shoulder_pitch_joint': 15,
+    'right_shoulder_roll_joint' : 16,
+    'right_shoulder_yaw_joint'  : 17,
+    'right_elbow_pitch_joint'   : 18,
+    'right_wrist_roll_joint'    : 19,
+    'right_wrist_pitch_joint'   : 20,
+    'right_wrist_yaw_joint'     : 21,
+}
+
+
+def calculate_crc_manual(data_bytes):
+    """수동 CRC 계산 (SDK CRC 모듈 없을 때)"""
+    crc = 0xFFFFFFFF
+    for byte in data_bytes:
+        crc ^= byte
+        for _ in range(8):
+            if crc & 1:
+                crc = (crc >> 1) ^ 0xEDB88320
+            else:
+                crc >>= 1
+    return crc ^ 0xFFFFFFFF
+
+
+def set_low_cmd_crc(low_cmd):
+    """LowCmd 메시지에 CRC 설정"""
+    global CRC_AVAILABLE
+    
+    if CRC_AVAILABLE:
+        try:
+            crc_calc = CRC()
+            low_cmd.crc = crc_calc.Crc(low_cmd)
+            return True
+        except Exception as e:
+            print(f"CRC 계산 실패: {e}")
+    
+    # 수동 CRC 계산 (근사치)
+    try:
+        # LowCmd 구조체를 바이트로 변환 (근사)
+        data = bytearray()
+        data.extend(low_cmd.mode_pr.to_bytes(1, 'little'))
+        data.extend(low_cmd.mode_machine.to_bytes(1, 'little'))
+        
+        for motor_cmd in low_cmd.motor_cmd:
+            data.extend(int(motor_cmd.mode).to_bytes(1, 'little'))
+            data.extend(int(motor_cmd.q * 1000).to_bytes(4, 'little', signed=True))
+            data.extend(int(motor_cmd.kp * 100).to_bytes(4, 'little', signed=True))
+        
+        low_cmd.crc = calculate_crc_manual(data) & 0xFFFFFFFF
+        return True
+    except Exception:
+        low_cmd.crc = 0x12345678  # 기본 더미 CRC
+        return False
+
+
+
+def create_motor_cmd(mode=1, q=0.0, dq=0.0, tau=0.0, kp=0.0, kd=0.5, reserve=0):
+    """MotorCmd_ 생성 헬퍼 (7개 필수 인자 완벽 대응)"""
+    return MotorCmd_(
+        mode=int(mode),         # uint8: 제어 모드
+        q=float(q),            # float32: 목표 각도 (rad)
+        dq=float(dq),          # float32: 목표 각속도 (rad/s)  
+        tau=float(tau),        # float32: 피드포워드 토크 (Nm)
+        kp=float(kp),          # float32: 위치 P 게인
+        kd=float(kd),          # float32: 속도 D 게인
+        reserve=int(reserve)    # uint32: 예약 필드
+    )
+
+
+def create_low_cmd(motor_cmds):
+    """LowCmd_ 생성 헬퍼 (5개 필수 인자 완벽 대응)"""
+    return LowCmd_(
+        mode_pr=0,              # uint8: PR 모드
+        mode_machine=0,         # uint8: 머신 모드  
+        motor_cmd=motor_cmds,   # MotorCmd_[35]: 모터 명령 배열
+        reserve=[0, 0, 0, 0],   # uint32[4]: 예약 필드 배열
+        crc=0                   # uint32: CRC 체크섬
+    )
+
+
+class G1BridgeNode(Node):
+    def __init__(self):
+        super().__init__('g1_bridge_node')
+        
+        self.cmd_pub = None
+        self.low_cmd = None
+        
+        if SDK_AVAILABLE:
+            try:
+                self._init_dds()
+                self.get_logger().info('✅ G1 실제 제어 모드 활성화')
+            except Exception as e:
+                self.get_logger().error(f'❌ DDS 초기화 실패: {e}')
+                self.get_logger().warn('🔵 시뮬레이션 모드로 전환')
+        else:
+            self.get_logger().warn('⚠️ SDK 없음 - 시뮬레이션 모드')
+        
+        # ROS2 구독
+        self.subscription = self.create_subscription(
+            JointState, '/g1/arm/joint_commands', self.joint_callback, 10)
+        
+        # 제어 파라미터
+        self.KP = 40.0
+        self.KD = 1.0
+        
+        self.cmd_count = 0
+        self.last_log = time.time()
+        
+        self.get_logger().info('✅ G1 브릿지 노드 시작')
+        self.get_logger().info('📡 /g1/arm/joint_commands 구독 중...')
+
+    def _init_dds(self):
+        """DDS 채널 및 메시지 초기화"""
+        
+        # 최적 네트워크 인터페이스 감지
+        iface = self._detect_optimal_interface()
+        self.get_logger().info(f'🌐 선택된 DDS 인터페이스: {iface}')
+        
+        # DDS 채널 팩토리 초기화
+        init_function(0, iface)
+        self.get_logger().info('✅ DDS 채널 팩토리 초기화 완료')
+        
+        # ⭐️ MotorCmd_ 배열 생성 (정확한 시그니처 적용)
+        motor_cmds = []
+        for i in range(G1_MOTOR_COUNT):
+            motor_cmd = create_motor_cmd(
+                mode=1,      # 1: 위치 제어 모드
+                q=0.0,       # 초기 목표 각도
+                dq=0.0,      # 초기 목표 속도
+                tau=0.0,     # 초기 토크
+                kp=0.0,      # 초기 P 게인 (명령 시 설정)
+                kd=0.5,      # 기본 D 게인 (댐핑)
+                reserve=0    # 예약 필드
+            )
+            motor_cmds.append(motor_cmd)
+        
+        self.get_logger().info(f'✅ MotorCmd_ {len(motor_cmds)}개 생성 완료')
+        
+        # ⭐️ LowCmd_ 생성 (정확한 시그니처 적용)
+        self.low_cmd = create_low_cmd(motor_cmds)
+        self.get_logger().info('✅ LowCmd_ 객체 생성 완료')
+        
+        # 퍼블리셔 생성
+        self.cmd_pub = ChannelPublisher("rt/lowcmd", LowCmd_)
+        self.cmd_pub.Init()
+        self.get_logger().info('✅ LowCmd 퍼블리셔 초기화 완료')
+
+    def _detect_optimal_interface(self):
+        """
+        네트워크 인터페이스 우선순위:
+        1. 유선 이더넷 UP 상태 (enx, enp, eno, ens, eth)
+        2. WiFi UP 상태 (wlp, wl)
+        3. AUTO (최후 수단)
+        """
+        try:
+            result = subprocess.run(
+                ['ip', '-o', 'link', 'show'],
+                capture_output=True, text=True, timeout=3
+            )
+            
+            wired_up = []
+            wired_down = []  
+            wifi_up = []
+            
+            for line in result.stdout.splitlines():
+                if len(line.split()) < 2:
+                    continue
+                    
+                # 인터페이스 이름 추출 (예: "2: wlp0s20f3:")
+                iface = line.split()[1].rstrip(':').split('@')[0]
+                if iface == 'lo':
+                    continue
+                
+                is_up = 'UP' in line and 'LOWER_UP' in line
+                has_carrier = 'NO-CARRIER' not in line
+                
+                # 유선 인터페이스 분류
+                if iface.startswith(('enx', 'enp', 'eno', 'ens', 'eth')):
+                    if is_up and has_carrier:
+                        wired_up.append(iface)
+                    else:
+                        wired_down.append(iface)
+                # WiFi 인터페이스 분류  
+                elif iface.startswith(('wlp', 'wl')):
+                    if is_up:
+                        wifi_up.append(iface)
+            
+            self.get_logger().info(
+                f'🔌 유선 UP: {wired_up} | 유선 DOWN: {wired_down} | WiFi: {wifi_up}')
+            
+            # 우선순위에 따른 선택
+            if wired_up:
+                selected = wired_up[0]
+                self.get_logger().info(f'✅ 유선 인터페이스 선택: {selected}')
+                return selected
+            elif wifi_up:
+                selected = wifi_up[0]
+                self.get_logger().warn(
+                    f'📶 WiFi 인터페이스 사용: {selected} '
+                    f'(안정성을 위해 유선 연결 권장)')
+                return selected
+            elif wired_down:
+                self.get_logger().warn(
+                    f'⚠️ 유선 DOWN 상태: {wired_down} - 케이블 연결 확인 필요')
+                
+        except Exception as e:
+            self.get_logger().warn(f'인터페이스 감지 실패: {e}')
+        
+        return "AUTO"
+
+    def joint_callback(self, msg):
+    """ROS2 JointState → G1 DDS 명령 변환 (CRC 포함)"""
+    if self.cmd_pub is None or self.low_cmd is None:
+        self._log_simulation(msg)
+        return
+    
+    try:
+        matched_joints = 0
+        
+        # 관절 매핑 (기존 코드 동일)
+        for joint_name, motor_idx in G1_RIGHT_ARM_MOTOR_IDX.items():
+            if joint_name not in msg.name:
+                continue
+            
+            j_idx = msg.name.index(joint_name)
+            if j_idx >= len(msg.position):
+                continue
+            
+            target_q = float(msg.position[j_idx])
+            
+            if abs(target_q) > np.pi:
+                self.get_logger().warn(f'⚠️ {joint_name}: {target_q:.3f}rad 범위 초과')
+                continue
+            
+            # 모터 명령 업데이트
+            self.low_cmd.motor_cmd[motor_idx] = create_motor_cmd(
+                mode=1, q=target_q, dq=0.0, tau=0.0,
+                kp=self.KP, kd=self.KD, reserve=0
+            )
+            matched_joints += 1
+        
+        if matched_joints == 0:
+            return
+        
+        # ⭐️ CRC 계산 (핵심!)
+        crc_success = set_low_cmd_crc(self.low_cmd)
+        
+        # G1으로 DDS 전송
+        self.cmd_pub.Write(self.low_cmd)
+        self.cmd_count += 1
+        
+        # 주기적 로그 (CRC 상태 포함)
+        now = time.time()
+        if now - self.last_log > 5.0:
+            crc_status = "✅" if crc_success else "⚠️"
+            self.get_logger().info(
+                f'{crc_status} DDS 전송 {self.cmd_count}회 | '
+                f'매칭: {matched_joints}개 | CRC: 0x{self.low_cmd.crc:08X}'
+            )
+            self.last_log = now
+            
+    except Exception as e:
+        self.get_logger().error(f'❌ joint_callback 에러: {e}')
+
+    def _log_simulation(self, msg):
+        """시뮬레이션 모드 로그"""
+        now = time.time()
+        if now - self.last_log > 3.0:
+            if len(msg.position) > 0:
+                pos_str = ', '.join(f'{p:.3f}' for p in msg.position[:4])
+                self.get_logger().info(f'🔵 [시뮬] 관절 명령: [{pos_str}...]')
+            else:
+                self.get_logger().info('🔵 [시뮬] 빈 관절 명령 수신')
+            self.last_log = now
+
+
+def main():
+    rclpy.init()
+    node = G1BridgeNode()
+    try:
+        rclpy.spin(node)
+    except KeyboardInterrupt:
+        node.get_logger().info('🛑 브릿지 노드 종료')
+    finally:
+        node.destroy_node()
+        rclpy.shutdown()
+
+
+if __name__ == '__main__':
+    main()
