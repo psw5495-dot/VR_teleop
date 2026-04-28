@@ -1,13 +1,16 @@
+# G1 로봇 연결 테스트
+ping 192.168.123.26
+
+# G1 로봇에 SSH 접속
+ssh unitree@192.168.123.26
+
+# G1 내부에서 실행
 source /opt/ros/humble/setup.bash
 
-# 1. 현재 활성화된 모든 토픽 확인
-ros2 topic list
+# G1 ROS 2 드라이버 실행 (G1 모델에 따라 명령어 다름)
+ros2 launch unitree_ros2 g1_bringup.launch.py
+# 또는
+ros2 run unitree_ros2 g1_driver_node
 
-# 2. G1 관련 토픽 필터링
-ros2 topic list | grep -i "g1\|joint\|arm\|cmd\|command"
-
-# 3. joint_states 토픽 확인 (G1 연결 상태)
-ros2 topic echo /joint_states --once
-
-# 4. 우리가 보내는 토픽이 실제로 발행되는지 확인
-ros2 topic echo /g1/arm/joint_commands
+# 토픽 확인
+ros2 topic list | grep -i "joint\|arm"
