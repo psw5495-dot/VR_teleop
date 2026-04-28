@@ -1,501 +1,272 @@
 #!/usr/bin/env python3
-# ~/g1_teleop/serve_webxr.py
+# ~/g1_teleop/g1_ik_node.py
 """
-WebXR HTTPS 서버 - 공유기 네트워크 환경 최적화
-Quest3(WiFi) → Ubuntu PC(유선) 통신
+G1 역기구학 노드 - 모든 들여쓰기 버그 수정 완료
 """
 
-import json
-import ssl
+import rclpy
+from rclpy.node import Node
+from geometry_msgs.msg import PoseStamped
+from sensor_msgs.msg import JointState
+import numpy as np
+import pinocchio as pin
+import os
 import time
 import threading
-import socket
-from http.server import HTTPServer, SimpleHTTPRequestHandler
+import xml.etree.ElementTree as ET
 
-from teleop_pipeline import TeleopConfig, TeleopPipeline, parse_frame_from_json
 
-# ── ROS2 연동 (선택적) ────────────────────────────────────────
-try:
-    import rclpy
-    from rclpy.node import Node
-    from geometry_msgs.msg import PoseStamped
-    ROS2_AVAILABLE = True
-    print("✅ ROS2 감지됨 - 토픽 퍼블리셔 활성화")
-except ImportError:
-    ROS2_AVAILABLE = False
-    print("⚠️  ROS2 없음 - 파이프라인만 동작")
-
-# ── 네트워크 설정 ─────────────────────────────────────────────
-HOST = "0.0.0.0"   # 모든 인터페이스에서 수신 (Quest3 WiFi 접속 허용)
-PORT = 8443
-
-def get_local_ip():
-    """Ubuntu PC의 LAN IP 자동 감지"""
-    try:
-        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        s.connect(("8.8.8.8", 80))
-        ip = s.getsockname()[0]
-        s.close()
-        return ip
-    except Exception:
-        return "127.0.0.1"
-
-# ── 파이프라인 설정 ───────────────────────────────────────────
-cfg = TeleopConfig(
-    pos_scale=0.5,
-    robot_home_pos=(0.35, -0.20, 0.45),
-    max_dx=0.10, max_dy=0.10, max_dz=0.10,
-    ema_alpha=0.15,
-    watchdog_timeout_s=0.3,
-    axis_sign=(1.0, -1.0, -1.0),
-)
-pipeline = TeleopPipeline(cfg)
-
-# ── ROS2 퍼블리셔 노드 ────────────────────────────────────────
-class G1PosePublisher(Node):
+class G1IKNode(Node):
     def __init__(self):
-        super().__init__('g1_pose_publisher')
-        self.target_pub = self.create_publisher(
-            PoseStamped, '/g1/target_pose', 10)
-        self.vr_pub = self.create_publisher(
-            PoseStamped, '/vr/raw_pose', 10)
-        self.msg_count = 0
-        self.get_logger().info('✅ G1 Pose Publisher 시작')
+        super().__init__('g1_ik_node')
+        
+        self.setup_pinocchio_model()
+        
+        self.target_sub = self.create_subscription(
+            PoseStamped, '/g1/target_pose', self.target_callback, 10)
+        self.joint_pub = self.create_publisher(
+            JointState, '/g1/arm/joint_commands', 10)
+        self.joint_state_sub = self.create_subscription(
+            JointState, '/joint_states', self.joint_state_callback, 10)
+        
+        self.emergency_stop = False
+        self.robot_connected = False
+        self.last_log_time = time.time()
+        self.prev_q = None
+        
+        self.workspace_limits = {
+            'x_min': 0.05, 'x_max': 1.0,
+            'y_min': -0.8, 'y_max': 0.8,
+            'z_min': 0.1,  'z_max': 1.5
+        }
+        
+        threading.Thread(target=self.keyboard_monitor, daemon=True).start()
+        
+        self.get_logger().info('🤖 G1 IK 노드 시작!')
+        self.get_logger().info('📡 /g1/target_pose 구독 중...')
+        self.get_logger().info('⚠️  s=비상정지 | r=재개')
 
-    def publish_poses(self, result):
-        if not result:
+    def setup_pinocchio_model(self):
+        """URDF 로드 및 모델 초기화"""
+        base_dir = os.path.dirname(os.path.abspath(__file__))
+        candidates = [
+            os.path.join(base_dir, 'models', 'g1', 'g1_body29_hand14.urdf'),
+            os.path.join(base_dir, 'models', 'g1', 'g1_body23.urdf'),
+        ]
+        
+        urdf_path = None
+        for path in candidates:
+            if os.path.exists(path):
+                urdf_path = path
+                break
+        
+        if not urdf_path:
+            self.get_logger().error('❌ URDF 파일 없음!')
+            self.get_logger().error('G1에서 복사: scp -r unitree@[G1_IP]:'
+                                  '/home/unitree/xr_teleoperate/assets/g1 '
+                                  './models/')
+            exit(1)
+        
+        try:
+            self.model = pin.buildModelFromUrdf(urdf_path)
+            self.data = self.model.createData()
+            self.current_q = pin.neutral(self.model)
+            
+            self.get_logger().info(f'✅ URDF 로드: {os.path.basename(urdf_path)}')
+            self.get_logger().info(f'   관절 수: {self.model.nq}')
+        except Exception as e:
+            self.get_logger().error(f'❌ URDF 파싱 실패: {e}')
+            exit(1)
+        
+        self.right_arm_joints = self._parse_right_arm_joints(urdf_path)
+        self.ee_frame_id = self._find_ee_frame()
+
+    def _parse_right_arm_joints(self, urdf_path):
+        """오른팔 관절 파싱"""
+        target_joints = [
+            'right_shoulder_pitch_joint', 'right_shoulder_roll_joint',
+            'right_shoulder_yaw_joint',   'right_elbow_pitch_joint',
+            'right_wrist_roll_joint',     'right_wrist_pitch_joint',
+            'right_wrist_yaw_joint'
+        ]
+        
+        try:
+            tree = ET.parse(urdf_path)
+            root = tree.getroot()
+            
+            valid_joints = []
+            for target_name in target_joints:
+                for joint in root.findall('joint'):
+                    if (joint.get('name') == target_name and
+                        joint.get('type') in ['revolute', 'continuous']):
+                        valid_joints.append(target_name)
+                        break
+            
+            self.get_logger().info(f'✅ 오른팔 관절 {len(valid_joints)}개: {valid_joints}')
+            return valid_joints
+            
+        except Exception as e:
+            self.get_logger().error(f'관절 파싱 에러: {e}')
+            return []
+
+    def _find_ee_frame(self):
+        """End-effector 프레임 탐색"""
+        candidates = [
+            'right_wrist_yaw_link',   'right_wrist_pitch_link',
+            'right_wrist_roll_link',  'right_hand_base_link',
+            'right_hand_link',        'right_elbow_pitch_link'
+        ]
+        
+        for name in candidates:
+            if self.model.existFrame(name):
+                frame_id = self.model.getFrameId(name)
+                self.get_logger().info(f'✅ EE 프레임: {name} (ID: {frame_id})')
+                return frame_id
+        
+        # 디버깅용 프레임 목록
+        self.get_logger().warn('⚠️ 표준 EE 프레임 없음. 사용 가능한 프레임:')
+        for i in range(min(15, self.model.nframes)):
+            self.get_logger().info(f'   [{i}] {self.model.frames[i].name}')
+        
+        frame_id = self.model.nframes - 1
+        self.get_logger().warn(f'⚠️ 마지막 프레임 사용: {self.model.frames[frame_id].name}')
+        return frame_id
+
+    def keyboard_monitor(self):
+        """비상 정지 키보드 모니터링"""
+        try:
+            while rclpy.ok():
+                key = input().strip().lower()
+                if key in ['s', 'stop']:
+                    self.emergency_stop = True
+                    self.get_logger().warn('🛑 비상 정지!')
+                elif key in ['r', 'start']:
+                    self.emergency_stop = False
+                    self.get_logger().info('▶️ 재개')
+        except Exception:
+            pass
+
+    def joint_state_callback(self, msg):
+        """관절 상태 업데이트"""
+        if not self.robot_connected:
+            self.robot_connected = True
+            self.get_logger().info('✅ G1 관절 상태 수신!')
+
+    def check_workspace_limits(self, pos):
+        """작업 공간 안전 제한"""
+        x, y, z = pos
+        lim = self.workspace_limits
+        
+        if not (lim['x_min'] <= x <= lim['x_max']):
+            return False, f"x={x:.3f} 범위 초과"
+        if not (lim['y_min'] <= y <= lim['y_max']):
+            return False, f"y={y:.3f} 범위 초과"
+        if not (lim['z_min'] <= z <= lim['z_max']):
+            return False, f"z={z:.3f} 범위 초과"
+        
+        return True, "OK"
+
+    def solve_ik(self, target_pos):
+        """Pinocchio IK 계산"""
+        q = self.current_q.copy()
+        eps, max_iter, dt, damp = 1e-3, 50, 0.1, 1e-4
+        
+        for _ in range(max_iter):
+            pin.forwardKinematics(self.model, self.data, q)
+            pin.updateFramePlacements(self.model, self.data)
+            
+            current_pos = self.data.oMf[self.ee_frame_id].translation
+            error = target_pos - current_pos
+            
+            if np.linalg.norm(error) < eps:
+                return q, True
+            
+            J = pin.computeFrameJacobian(
+                self.model, self.data, q, self.ee_frame_id,
+                pin.ReferenceFrame.LOCAL_WORLD_ALIGNED
+            )[:3, :]
+            
+            dq = J.T @ np.linalg.solve(J @ J.T + damp * np.eye(3), error)
+            q = np.clip(q + dt * dq,
+                       self.model.lowerPositionLimit,
+                       self.model.upperPositionLimit)
+        
+        return q, False
+
+    def target_callback(self, msg):
+        """목표 좌표 → 관절 각도 변환"""
+        if self.emergency_stop:
             return
-        now = self.get_clock().now().to_msg()
+        
+        try:
+            target_pos = np.array([
+                msg.pose.position.x,
+                msg.pose.position.y,
+                msg.pose.position.z
+            ])
+            
+            # 안전 제한 확인
+            ok, reason = self.check_workspace_limits(target_pos)
+            if not ok:
+                self.get_logger().warn(f'⚠️ 안전 제한: {reason}')
+                return
+            
+            # IK 계산
+            q_target, converged = self.solve_ik(target_pos)
+            if q_target is None:
+                return
+            
+            # 급격한 각도 변화 방지
+            MAX_DELTA = 0.1  # rad/step
+            if self.prev_q is not None:
+                diff = q_target - self.prev_q
+                max_change = np.max(np.abs(diff))
+                if max_change > MAX_DELTA:
+                    q_target = self.prev_q + (diff / max_change) * MAX_DELTA
+            
+            self.publish_joint_command(q_target)
+            self.current_q = q_target
+            self.prev_q = q_target.copy()
+            
+            # 주기적 로그
+            now = time.time()
+            if now - self.last_log_time > 2.0:
+                status = "수렴" if converged else "근사"
+                self.get_logger().info(
+                    f'✅ IK {status} → pos=({target_pos[0]:.3f}, '
+                    f'{target_pos[1]:.3f}, {target_pos[2]:.3f})'
+                )
+                self.last_log_time = now
+                
+        except Exception as e:
+            self.get_logger().error(f'target_callback 에러: {e}')
 
-        # 필터링된 목표 좌표 발행
-        if 'target_pose' in result:
-            t = result['target_pose']
-            msg = PoseStamped()
-            msg.header.stamp = now
-            msg.header.frame_id = 'g1_base_link'
-            msg.pose.position.x = float(t['x'])
-            msg.pose.position.y = float(t['y'])
-            msg.pose.position.z = float(t['z'])
-            msg.pose.orientation.x = float(t.get('qx', 0))
-            msg.pose.orientation.y = float(t.get('qy', 0))
-            msg.pose.orientation.z = float(t.get('qz', 0))
-            msg.pose.orientation.w = float(t.get('qw', 1))
-            self.target_pub.publish(msg)
+    def publish_joint_command(self, q):
+        """관절 명령 발행"""
+        if not self.right_arm_joints:
+            return
+        
+        msg = JointState()
+        msg.header.stamp = self.get_clock().now().to_msg()
+        msg.name = self.right_arm_joints
+        n = len(self.right_arm_joints)
+        msg.position = q[:n].tolist()
+        msg.velocity = [0.0] * n
+        
+        self.joint_pub.publish(msg)
 
-        # 원시 VR 데이터 발행 (디버깅용)
-        if 'raw_vr_pose' in result:
-            r = result['raw_vr_pose']
-            msg2 = PoseStamped()
-            msg2.header.stamp = now
-            msg2.header.frame_id = 'quest3_world'
-            msg2.pose.position.x = float(r['x'])
-            msg2.pose.position.y = float(r['y'])
-            msg2.pose.position.z = float(r['z'])
-            msg2.pose.orientation.x = float(r.get('qx', 0))
-            msg2.pose.orientation.y = float(r.get('qy', 0))
-            msg2.pose.orientation.z = float(r.get('qz', 0))
-            msg2.pose.orientation.w = float(r.get('qw', 1))
-            self.vr_pub.publish(msg2)
 
-        self.msg_count += 1
-        if self.msg_count % 150 == 0:
-            self.get_logger().info(f'📊 {self.msg_count}개 메시지 발행')
-
-ros_publisher = None
-
-def ros_spin_thread():
-    """ROS2 노드 백그라운드 실행"""
-    global ros_publisher
+def main():
     rclpy.init()
-    ros_publisher = G1PosePublisher()
+    node = G1IKNode()
     try:
-        rclpy.spin(ros_publisher)
+        rclpy.spin(node)
     except KeyboardInterrupt:
-        pass
+        node.get_logger().info('🛑 IK 노드 종료')
     finally:
-        ros_publisher.destroy_node()
+        node.destroy_node()
         rclpy.shutdown()
 
-# ── HTTP 요청 핸들러 ──────────────────────────────────────────
-class Handler(SimpleHTTPRequestHandler):
 
-    def do_GET(self):
-        if self.path in ('/', '/index.html'):
-            html = get_webxr_html()
-            data = html.encode('utf-8')
-            self._respond(200, 'text/html; charset=utf-8', data)
-        elif self.path == '/status':
-            status = {
-                "server": "running",
-                "ros2": ROS2_AVAILABLE,
-                "pipeline": "ready",
-                "time": time.time(),
-                "local_ip": get_local_ip()
-            }
-            self._respond(200, 'application/json',
-                          json.dumps(status, indent=2).encode())
-        else:
-            self.send_response(404)
-            self.end_headers()
-
-    def do_POST(self):
-        if self.path == '/pose':
-            length = int(self.headers.get('Content-Length', 0))
-            raw = self.rfile.read(length)
-            try:
-                data = json.loads(raw.decode('utf-8'))
-                frame = parse_frame_from_json(data)
-                result = pipeline.process(frame)
-
-                # ROS2 토픽 발행
-                if ROS2_AVAILABLE and ros_publisher:
-                    ros_publisher.publish_poses(result)
-
-                self._respond(200, 'application/json',
-                              json.dumps(result).encode(), cors=True)
-
-            except Exception as e:
-                print(f"POST 에러: {e}")
-                err = json.dumps({'ok': False, 'error': str(e)}).encode()
-                self._respond(500, 'application/json', err)
-
-        elif self.path == '/reset':
-            pipeline.reset_origin()
-            self._respond(200, 'application/json',
-                          json.dumps({'ok': True}).encode())
-        else:
-            self.send_response(404)
-            self.end_headers()
-
-    def do_OPTIONS(self):
-        """Quest3 브라우저 CORS preflight 처리"""
-        self.send_response(200)
-        self.send_header('Access-Control-Allow-Origin', '*')
-        self.send_header('Access-Control-Allow-Methods', 'GET, POST, OPTIONS')
-        self.send_header('Access-Control-Allow-Headers', 'Content-Type')
-        self.end_headers()
-
-    def _respond(self, code, content_type, data, cors=False):
-        self.send_response(code)
-        self.send_header('Content-Type', content_type)
-        self.send_header('Content-Length', str(len(data)))
-        if cors:
-            self.send_header('Access-Control-Allow-Origin', '*')
-        self.end_headers()
-        self.wfile.write(data)
-
-    def log_message(self, fmt, *args):
-        # /pose 요청 로그 생략 (너무 빈번함)
-        if args and '/pose' in str(args[0]):
-            return
-        super().log_message(fmt, *args)
-
-# ── WebXR HTML 페이지 ─────────────────────────────────────────
-def get_webxr_html():
-    return """<!DOCTYPE html>
-<html>
-<head>
-    <title>G1 MR Teleoperation</title>
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <style>
-        * { box-sizing: border-box; }
-        body {
-            background: linear-gradient(135deg, #1a1a2e, #16213e);
-            color: white; font-family: 'Segoe UI', sans-serif;
-            display: flex; flex-direction: column; align-items: center;
-            justify-content: center; min-height: 100vh; margin: 0;
-            padding: 20px; text-align: center;
-        }
-        h1 { font-size: 2em; margin-bottom: 20px; text-shadow: 2px 2px 4px rgba(0,0,0,0.5); }
-        button {
-            font-size: 17px; padding: 14px 28px; margin: 8px;
-            border-radius: 10px; border: none; cursor: pointer;
-            font-weight: bold; transition: all 0.2s;
-            touch-action: manipulation; width: 85%; max-width: 400px;
-        }
-        button:active { transform: scale(0.97); }
-        #btn-check  { background: #2196F3; color: white; }
-        #btn-ar     { background: #4CAF50; color: white; }
-        #btn-vr     { background: #9C27B0; color: white; }
-        #btn-reset  { background: #FF9800; color: white; }
-        #status {
-            margin: 12px 0; padding: 10px 18px; border-radius: 8px;
-            font-size: 14px; font-weight: bold; width: 85%; max-width: 400px;
-            background: rgba(255,255,255,0.1);
-        }
-        #log {
-            background: rgba(0,0,0,0.85); color: #00ff41; padding: 10px;
-            width: 90%; max-width: 500px; height: 160px; overflow-y: auto;
-            text-align: left; font-family: monospace; font-size: 12px;
-            border-radius: 6px; margin-top: 12px; border: 1px solid #333;
-        }
-        #pose-display {
-            background: rgba(0,0,0,0.6); color: #00cfff; padding: 8px 14px;
-            border-radius: 6px; font-family: monospace; font-size: 13px;
-            width: 85%; max-width: 400px; margin: 6px 0; display: none;
-        }
-    </style>
-</head>
-<body>
-    <h1>🤖 G1 MR Teleoperation</h1>
-    <div id="status">🔄 시스템 준비 중...</div>
-    <div id="pose-display">📍 대기 중...</div>
-
-    <button id="btn-check" onclick="runCheck()">🔍 1단계: 환경 검사</button>
-    <button id="btn-ar" onclick="startAR()">🌍 2단계: MR 시작</button>
-    <button id="btn-vr" onclick="startVR()">🥽 3단계: VR 시작</button>
-    <button id="btn-reset" onclick="resetOrigin()">🔄 기준점 재설정</button>
-
-    <div id="log">시스템 대기 중...<br></div>
-
-<script>
-// ── 유틸리티 ─────────────────────────────────────────────────
-const logEl = document.getElementById('log');
-const statusEl = document.getElementById('status');
-const poseEl = document.getElementById('pose-display');
-
-function log(msg) {
-    const t = new Date().toLocaleTimeString();
-    logEl.innerHTML += `[${t}] ${msg}<br>`;
-    logEl.scrollTop = logEl.scrollHeight;
-    console.log(msg);
-}
-
-function setStatus(msg, color) {
-    statusEl.textContent = msg;
-    statusEl.style.background = color || 'rgba(255,255,255,0.1)';
-}
-
-// ── 1단계: 환경 검사 ──────────────────────────────────────────
-async function runCheck() {
-    log('=== 환경 검사 시작 ===');
-
-    // HTTPS 확인
-    const isHttps = location.protocol === 'https:';
-    log((isHttps ? '✅' : '❌') + ' HTTPS: ' + location.protocol);
-    if (!isHttps) {
-        setStatus('❌ HTTPS 필수!', 'rgba(244,67,54,0.4)');
-        return;
-    }
-
-    // 서버 연결 확인
-    try {
-        const r = await fetch('/status');
-        const s = await r.json();
-        log(`✅ 서버 연결 성공 | ROS2: ${s.ros2 ? '연동됨' : '없음'}`);
-        log(`📡 서버 IP: ${s.local_ip}`);
-    } catch(e) {
-        log('❌ 서버 연결 실패: ' + e.message);
-        setStatus('❌ 서버 연결 실패', 'rgba(244,67,54,0.4)');
-        return;
-    }
-
-    // WebXR 지원 확인
-    if (!navigator.xr) {
-        log('❌ navigator.xr 없음 (WebXR 미지원)');
-        setStatus('❌ WebXR 미지원', 'rgba(244,67,54,0.4)');
-        return;
-    }
-    log('✅ navigator.xr 확인');
-
-    // AR/VR 지원 확인
-    try {
-        const arOk = await navigator.xr.isSessionSupported('immersive-ar');
-        const vrOk = await navigator.xr.isSessionSupported('immersive-vr');
-        log((arOk ? '✅' : '⚠️') + ' AR(패스스루): ' + (arOk ? '지원' : '미지원'));
-        log((vrOk ? '✅' : '❌') + ' VR: ' + (vrOk ? '지원' : '미지원'));
-        
-        if (vrOk) {
-            setStatus('✅ 검사 통과 - MR/VR 시작 가능!', 'rgba(76,175,80,0.4)');
-        }
-    } catch(e) {
-        log('⚠️ XR 지원 확인 실패: ' + e.message);
-    }
-}
-
-// ── XR 세션 공통 변수 ─────────────────────────────────────────
-let xrSession = null;
-let xrRefSpace = null;
-let gl = null;
-let frameCount = 0;
-let lastSendMs = 0;
-const SEND_HZ = 30;   // WiFi 환경에 맞춘 전송 주파수
-
-// ── 2단계: MR 시작 ────────────────────────────────────────────
-async function startAR() {
-    log('🌍 MR(패스스루) 세션 시작...');
-    try {
-        xrSession = await navigator.xr.requestSession('immersive-ar', {
-            optionalFeatures: ['local-floor']
-        });
-        log('✅ MR 세션 생성 성공!');
-        await setupXRSession(true);
-    } catch(e) {
-        log(`❌ MR 실패: ${e.name} - ${e.message}`);
-        if (e.name === 'NotSupportedError') {
-            log('⚠️ 패스스루 미지원 → VR 모드로 자동 전환...');
-            setTimeout(startVR, 800);
-        }
-    }
-}
-
-// ── 3단계: VR 시작 ────────────────────────────────────────────
-async function startVR() {
-    log('🥽 VR 세션 시작...');
-    try {
-        xrSession = await navigator.xr.requestSession('immersive-vr', {
-            optionalFeatures: ['local-floor']
-        });
-        log('✅ VR 세션 생성 성공!');
-        await setupXRSession(false);
-    } catch(e) {
-        log(`❌ VR 실패: ${e.name} - ${e.message}`);
-    }
-}
-
-// ── XR 세션 공통 설정 ─────────────────────────────────────────
-async function setupXRSession(isAR) {
-    // WebGL 컨텍스트 생성
-    const canvas = document.createElement('canvas');
-    gl = canvas.getContext('webgl', { xrCompatible: true });
-    if (!gl) throw new Error('WebGL 컨텍스트 생성 실패');
-
-    // XRWebGLLayer 연결
-    const layer = new XRWebGLLayer(xrSession, gl);
-    await xrSession.updateRenderState({ baseLayer: layer });
-    log(`✅ WebGL 레이어 연결 (${isAR ? 'MR' : 'VR'} 모드)`);
-
-    // 참조 공간 설정
-    try {
-        xrRefSpace = await xrSession.requestReferenceSpace('local-floor');
-        log('✅ local-floor 참조 공간');
-    } catch(_) {
-        xrRefSpace = await xrSession.requestReferenceSpace('local');
-        log('✅ local 참조 공간 (fallback)');
-    }
-
-    // UI 전환
-    ['btn-check','btn-ar','btn-vr','btn-reset','log','status']
-        .forEach(id => {
-            const el = document.getElementById(id);
-            if (el) el.style.display = 'none';
-        });
-    poseEl.style.display = 'block';
-    document.body.style.background = isAR ? 'transparent' : '#111';
-
-    // 세션 종료 처리
-    xrSession.addEventListener('end', () => {
-        log(`${isAR ? 'MR' : 'VR'} 세션 종료`);
-        location.reload();
-    });
-
-    // 렌더링 루프 시작
-    xrSession.requestAnimationFrame((t, f) => onXRFrame(t, f, isAR));
-    log(`🚀 ${isAR ? 'MR' : 'VR'} 컨트롤러 추적 시작!`);
-}
-
-// ── XR 프레임 루프 ────────────────────────────────────────────
-function onXRFrame(time, frame, isAR) {
-    if (!xrSession || !gl) return;
-    xrSession.requestAnimationFrame((t, f) => onXRFrame(t, f, isAR));
-
-    // 화면 클리어 (무한 로딩 방지)
-    gl.bindFramebuffer(gl.FRAMEBUFFER, xrSession.renderState.baseLayer.framebuffer);
-    gl.clearColor(0, 0, 0, isAR ? 0.0 : 1.0);
-    gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
-
-    // 30Hz 전송 제한
-    if (time - lastSendMs < 1000 / SEND_HZ) return;
-    lastSendMs = time;
-
-    // 오른손 컨트롤러 추적
-    for (const src of xrSession.inputSources) {
-        if (src.handedness !== 'right' || !src.gripSpace) continue;
-        const pose = frame.getPose(src.gripSpace, xrRefSpace);
-        if (!pose) continue;
-
-        const p = pose.transform.position;
-        const o = pose.transform.orientation;
-
-        // 포즈 디스플레이 업데이트
-        frameCount++;
-        if (frameCount % 30 === 0) {
-            poseEl.textContent = 
-                `📍 R: x=${p.x.toFixed(3)} y=${p.y.toFixed(3)} z=${p.z.toFixed(3)} | ${frameCount}f`;
-        }
-
-        sendPose('right', p.x, p.y, p.z, o.x, o.y, o.z, o.w);
-        break;
-    }
-}
-
-// ── 포즈 전송 ─────────────────────────────────────────────────
-function sendPose(hand, x, y, z, qx, qy, qz, qw) {
-    fetch('/pose', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-            hand, x, y, z, qx, qy, qz, qw,
-            timestamp: Date.now() / 1000
-        })
-    })
-    .then(r => r.json())
-    .then(result => {
-        if (result.status === 'watchdog_home') {
-            console.warn('⚠️ 워치독 발동 - 홈 복귀');
-            poseEl.textContent = '⚠️ 워치독 - 홈 복귀 중...';
-        }
-    })
-    .catch(e => console.debug('전송 에러:', e.message));
-}
-
-// ── 기준점 재설정 ─────────────────────────────────────────────
-function resetOrigin() {
-    log('🔄 기준점 재설정 요청...');
-    fetch('/reset', { method: 'POST' })
-        .then(r => r.json())
-        .then(() => log('✅ 기준점 재설정 완료'))
-        .catch(() => log('⚠️ 재설정 실패'));
-}
-
-// ── 초기화 ────────────────────────────────────────────────────
-log('✅ 페이지 로드 완료');
-setStatus('✅ 준비 완료 - 1단계 검사를 시작하세요');
-</script>
-</body>
-</html>"""
-
-# ── 메인 실행부 ──────────────────────────────────────────────
 if __name__ == '__main__':
-    print("=" * 60)
-    print("🚀 G1 MR Teleoperation 서버 시작")
-    print("=" * 60)
-
-    # ROS2 백그라운드 스레드 시작
-    if ROS2_AVAILABLE:
-        ros_thread = threading.Thread(target=ros_spin_thread, daemon=True)
-        ros_thread.start()
-        time.sleep(1.5)
-        print("✅ ROS2 노드 시작 완료")
-
-    # HTTPS 서버 시작
-    httpd = HTTPServer((HOST, PORT), Handler)
-    ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
-    ctx.load_cert_chain(certfile='cert.pem', keyfile='key.pem')
-    httpd.socket = ctx.wrap_socket(httpd.socket, server_side=True)
-
-    # 네트워크 정보 출력
-    local_ip = get_local_ip()
-    print(f"\n📡 네트워크 정보:")
-    print(f"   Ubuntu PC IP : {local_ip}")
-    print(f"   Quest3 접속  : https://{local_ip}:{PORT}")
-    print(f"   상태 확인    : https://{local_ip}:{PORT}/status")
-    print(f"\n⚠️  Quest3에서 '고급 → 계속 진행' 클릭 필요")
-    print(f"🛑 종료: Ctrl+C\n")
-
-    try:
-        httpd.serve_forever()
-    except KeyboardInterrupt:
-        print("\n🛑 서버 종료")
-
-
+    main()
