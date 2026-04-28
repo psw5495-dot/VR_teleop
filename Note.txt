@@ -1,119 +1,499 @@
-# ~/g1_teleop/teleop_pipeline.py
+#!/usr/bin/env python3
+# ~/g1_teleop/serve_webxr.py
 """
-VR 컨트롤러 포즈 → G1 목표 좌표 변환 파이프라인
-공유기 네트워크 환경 최적화
+WebXR HTTPS 서버 - 공유기 네트워크 환경 최적화
+Quest3(WiFi) → Ubuntu PC(유선) 통신
 """
 
+import json
+import ssl
 import time
-import numpy as np
-from dataclasses import dataclass, field
-from typing import Optional, Tuple
+import threading
+import socket
+from http.server import HTTPServer, SimpleHTTPRequestHandler
 
+from teleop_pipeline import TeleopConfig, TeleopPipeline, parse_frame_from_json
 
-@dataclass
-class TeleopConfig:
-    pos_scale: float = 0.5
-    robot_home_pos: Tuple[float, float, float] = (0.35, -0.20, 0.45)
-    max_dx: float = 0.10
-    max_dy: float = 0.10
-    max_dz: float = 0.10
-    ema_alpha: float = 0.15
-    watchdog_timeout_s: float = 0.3
-    axis_sign: Tuple[float, float, float] = (1.0, -1.0, -1.0)
+# ── ROS2 연동 (선택적) ────────────────────────────────────────
+try:
+    import rclpy
+    from rclpy.node import Node
+    from geometry_msgs.msg import PoseStamped
+    ROS2_AVAILABLE = True
+    print("✅ ROS2 감지됨 - 토픽 퍼블리셔 활성화")
+except ImportError:
+    ROS2_AVAILABLE = False
+    print("⚠️  ROS2 없음 - 파이프라인만 동작")
 
+# ── 네트워크 설정 ─────────────────────────────────────────────
+HOST = "0.0.0.0"   # 모든 인터페이스에서 수신 (Quest3 WiFi 접속 허용)
+PORT = 8443
 
-@dataclass
-class VRFrame:
-    hand: str
-    x: float
-    y: float
-    z: float
-    qx: float = 0.0
-    qy: float = 0.0
-    qz: float = 0.0
-    qw: float = 1.0
-    timestamp: float = field(default_factory=time.time)
+def get_local_ip():
+    """Ubuntu PC의 LAN IP 자동 감지"""
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.connect(("8.8.8.8", 80))
+        ip = s.getsockname()[0]
+        s.close()
+        return ip
+    except Exception:
+        return "127.0.0.1"
 
+# ── 파이프라인 설정 ───────────────────────────────────────────
+cfg = TeleopConfig(
+    pos_scale=0.5,
+    robot_home_pos=(0.35, -0.20, 0.45),
+    max_dx=0.10, max_dy=0.10, max_dz=0.10,
+    ema_alpha=0.15,
+    watchdog_timeout_s=0.3,
+    axis_sign=(1.0, -1.0, -1.0),
+)
+pipeline = TeleopPipeline(cfg)
 
-def parse_frame_from_json(data: dict) -> VRFrame:
-    return VRFrame(
-        hand=data.get('hand', 'right'),
-        x=float(data.get('x', 0)),
-        y=float(data.get('y', 0)),
-        z=float(data.get('z', 0)),
-        qx=float(data.get('qx', 0)),
-        qy=float(data.get('qy', 0)),
-        qz=float(data.get('qz', 0)),
-        qw=float(data.get('qw', 1)),
-        timestamp=float(data.get('timestamp', time.time()))
-    )
+# ── ROS2 퍼블리셔 노드 ────────────────────────────────────────
+class G1PosePublisher(Node):
+    def __init__(self):
+        super().__init__('g1_pose_publisher')
+        self.target_pub = self.create_publisher(
+            PoseStamped, '/g1/target_pose', 10)
+        self.vr_pub = self.create_publisher(
+            PoseStamped, '/vr/raw_pose', 10)
+        self.msg_count = 0
+        self.get_logger().info('✅ G1 Pose Publisher 시작')
 
+    def publish_poses(self, result):
+        if not result:
+            return
+        now = self.get_clock().now().to_msg()
 
-class TeleopPipeline:
-    def __init__(self, cfg: TeleopConfig):
-        self.cfg = cfg
-        self.origin: Optional[np.ndarray] = None
-        self.filtered_pos = np.array(cfg.robot_home_pos, dtype=float)
-        self.last_recv_time = time.time()
+        # 필터링된 목표 좌표 발행
+        if 'target_pose' in result:
+            t = result['target_pose']
+            msg = PoseStamped()
+            msg.header.stamp = now
+            msg.header.frame_id = 'g1_base_link'
+            msg.pose.position.x = float(t['x'])
+            msg.pose.position.y = float(t['y'])
+            msg.pose.position.z = float(t['z'])
+            msg.pose.orientation.x = float(t.get('qx', 0))
+            msg.pose.orientation.y = float(t.get('qy', 0))
+            msg.pose.orientation.z = float(t.get('qz', 0))
+            msg.pose.orientation.w = float(t.get('qw', 1))
+            self.target_pub.publish(msg)
 
-    def reset_origin(self):
-        """기준점 초기화"""
-        self.origin = None
-        self.filtered_pos = np.array(self.cfg.robot_home_pos, dtype=float)
-        print("🔄 기준점 초기화 완료")
+        # 원시 VR 데이터 발행 (디버깅용)
+        if 'raw_vr_pose' in result:
+            r = result['raw_vr_pose']
+            msg2 = PoseStamped()
+            msg2.header.stamp = now
+            msg2.header.frame_id = 'quest3_world'
+            msg2.pose.position.x = float(r['x'])
+            msg2.pose.position.y = float(r['y'])
+            msg2.pose.position.z = float(r['z'])
+            msg2.pose.orientation.x = float(r.get('qx', 0))
+            msg2.pose.orientation.y = float(r.get('qy', 0))
+            msg2.pose.orientation.z = float(r.get('qz', 0))
+            msg2.pose.orientation.w = float(r.get('qw', 1))
+            self.vr_pub.publish(msg2)
 
-    def process(self, frame: VRFrame) -> dict:
-        """VRFrame → 필터링된 목표 좌표"""
-        now = time.time()
-        
-        # 워치독: 오래된 데이터 감지시 안전 위치로 복귀
-        if (now - frame.timestamp) > self.cfg.watchdog_timeout_s:
-            self.filtered_pos = np.array(self.cfg.robot_home_pos, dtype=float)
-            return {
-                'status': 'watchdog_home',
-                'target_pose': self._pos_to_dict(self.filtered_pos, frame),
-                'raw_vr_pose': self._raw_dict(frame)
+        self.msg_count += 1
+        if self.msg_count % 150 == 0:
+            self.get_logger().info(f'📊 {self.msg_count}개 메시지 발행')
+
+ros_publisher = None
+
+def ros_spin_thread():
+    """ROS2 노드 백그라운드 실행"""
+    global ros_publisher
+    rclpy.init()
+    ros_publisher = G1PosePublisher()
+    try:
+        rclpy.spin(ros_publisher)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        ros_publisher.destroy_node()
+        rclpy.shutdown()
+
+# ── HTTP 요청 핸들러 ──────────────────────────────────────────
+class Handler(SimpleHTTPRequestHandler):
+
+    def do_GET(self):
+        if self.path in ('/', '/index.html'):
+            html = get_webxr_html()
+            data = html.encode('utf-8')
+            self._respond(200, 'text/html; charset=utf-8', data)
+        elif self.path == '/status':
+            status = {
+                "server": "running",
+                "ros2": ROS2_AVAILABLE,
+                "pipeline": "ready",
+                "time": time.time(),
+                "local_ip": get_local_ip()
             }
+            self._respond(200, 'application/json',
+                          json.dumps(status, indent=2).encode())
+        else:
+            self.send_response(404)
+            self.end_headers()
 
-        self.last_recv_time = now
-        raw_pos = np.array([frame.x, frame.y, frame.z])
+    def do_POST(self):
+        if self.path == '/pose':
+            length = int(self.headers.get('Content-Length', 0))
+            raw = self.rfile.read(length)
+            try:
+                data = json.loads(raw.decode('utf-8'))
+                frame = parse_frame_from_json(data)
+                result = pipeline.process(frame)
 
-        # 첫 프레임을 기준점으로 설정
-        if self.origin is None:
-            self.origin = raw_pos.copy()
-            print(f"📍 VR 기준점 설정: {self.origin}")
+                # ROS2 토픽 발행
+                if ROS2_AVAILABLE and ros_publisher:
+                    ros_publisher.publish_poses(result)
 
-        # 델타 계산 + 스케일링 + 축 방향 조정
-        delta = (raw_pos - self.origin) * \
-                np.array(self.cfg.axis_sign) * self.cfg.pos_scale
+                self._respond(200, 'application/json',
+                              json.dumps(result).encode(), cors=True)
 
-        # 최대 변위 제한 (안전성)
-        delta = np.clip(
-            delta,
-            [-self.cfg.max_dx, -self.cfg.max_dy, -self.cfg.max_dz],
-            [ self.cfg.max_dx,  self.cfg.max_dy,  self.cfg.max_dz]
-        )
+            except Exception as e:
+                print(f"POST 에러: {e}")
+                err = json.dumps({'ok': False, 'error': str(e)}).encode()
+                self._respond(500, 'application/json', err)
 
-        raw_target = np.array(self.cfg.robot_home_pos) + delta
+        elif self.path == '/reset':
+            pipeline.reset_origin()
+            self._respond(200, 'application/json',
+                          json.dumps({'ok': True}).encode())
+        else:
+            self.send_response(404)
+            self.end_headers()
 
-        # EMA 저역통과 필터 (떨림 제거)
-        alpha = self.cfg.ema_alpha
-        self.filtered_pos = alpha * raw_target + (1.0 - alpha) * self.filtered_pos
+    def do_OPTIONS(self):
+        """Quest3 브라우저 CORS preflight 처리"""
+        self.send_response(200)
+        self.send_header('Access-Control-Allow-Origin', '*')
+        self.send_header('Access-Control-Allow-Methods', 'GET, POST, OPTIONS')
+        self.send_header('Access-Control-Allow-Headers', 'Content-Type')
+        self.end_headers()
 
-        return {
-            'status': 'ok',
-            'target_pose': self._pos_to_dict(self.filtered_pos, frame),
-            'raw_vr_pose': self._raw_dict(frame)
+    def _respond(self, code, content_type, data, cors=False):
+        self.send_response(code)
+        self.send_header('Content-Type', content_type)
+        self.send_header('Content-Length', str(len(data)))
+        if cors:
+            self.send_header('Access-Control-Allow-Origin', '*')
+        self.end_headers()
+        self.wfile.write(data)
+
+    def log_message(self, fmt, *args):
+        # /pose 요청 로그 생략 (너무 빈번함)
+        if args and '/pose' in str(args[0]):
+            return
+        super().log_message(fmt, *args)
+
+# ── WebXR HTML 페이지 ─────────────────────────────────────────
+def get_webxr_html():
+    return """<!DOCTYPE html>
+<html>
+<head>
+    <title>G1 MR Teleoperation</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <style>
+        * { box-sizing: border-box; }
+        body {
+            background: linear-gradient(135deg, #1a1a2e, #16213e);
+            color: white; font-family: 'Segoe UI', sans-serif;
+            display: flex; flex-direction: column; align-items: center;
+            justify-content: center; min-height: 100vh; margin: 0;
+            padding: 20px; text-align: center;
+        }
+        h1 { font-size: 2em; margin-bottom: 20px; text-shadow: 2px 2px 4px rgba(0,0,0,0.5); }
+        button {
+            font-size: 17px; padding: 14px 28px; margin: 8px;
+            border-radius: 10px; border: none; cursor: pointer;
+            font-weight: bold; transition: all 0.2s;
+            touch-action: manipulation; width: 85%; max-width: 400px;
+        }
+        button:active { transform: scale(0.97); }
+        #btn-check  { background: #2196F3; color: white; }
+        #btn-ar     { background: #4CAF50; color: white; }
+        #btn-vr     { background: #9C27B0; color: white; }
+        #btn-reset  { background: #FF9800; color: white; }
+        #status {
+            margin: 12px 0; padding: 10px 18px; border-radius: 8px;
+            font-size: 14px; font-weight: bold; width: 85%; max-width: 400px;
+            background: rgba(255,255,255,0.1);
+        }
+        #log {
+            background: rgba(0,0,0,0.85); color: #00ff41; padding: 10px;
+            width: 90%; max-width: 500px; height: 160px; overflow-y: auto;
+            text-align: left; font-family: monospace; font-size: 12px;
+            border-radius: 6px; margin-top: 12px; border: 1px solid #333;
+        }
+        #pose-display {
+            background: rgba(0,0,0,0.6); color: #00cfff; padding: 8px 14px;
+            border-radius: 6px; font-family: monospace; font-size: 13px;
+            width: 85%; max-width: 400px; margin: 6px 0; display: none;
+        }
+    </style>
+</head>
+<body>
+    <h1>🤖 G1 MR Teleoperation</h1>
+    <div id="status">🔄 시스템 준비 중...</div>
+    <div id="pose-display">📍 대기 중...</div>
+
+    <button id="btn-check" onclick="runCheck()">🔍 1단계: 환경 검사</button>
+    <button id="btn-ar" onclick="startAR()">🌍 2단계: MR 시작</button>
+    <button id="btn-vr" onclick="startVR()">🥽 3단계: VR 시작</button>
+    <button id="btn-reset" onclick="resetOrigin()">🔄 기준점 재설정</button>
+
+    <div id="log">시스템 대기 중...<br></div>
+
+<script>
+// ── 유틸리티 ─────────────────────────────────────────────────
+const logEl = document.getElementById('log');
+const statusEl = document.getElementById('status');
+const poseEl = document.getElementById('pose-display');
+
+function log(msg) {
+    const t = new Date().toLocaleTimeString();
+    logEl.innerHTML += `[${t}] ${msg}<br>`;
+    logEl.scrollTop = logEl.scrollHeight;
+    console.log(msg);
+}
+
+function setStatus(msg, color) {
+    statusEl.textContent = msg;
+    statusEl.style.background = color || 'rgba(255,255,255,0.1)';
+}
+
+// ── 1단계: 환경 검사 ──────────────────────────────────────────
+async function runCheck() {
+    log('=== 환경 검사 시작 ===');
+
+    // HTTPS 확인
+    const isHttps = location.protocol === 'https:';
+    log((isHttps ? '✅' : '❌') + ' HTTPS: ' + location.protocol);
+    if (!isHttps) {
+        setStatus('❌ HTTPS 필수!', 'rgba(244,67,54,0.4)');
+        return;
+    }
+
+    // 서버 연결 확인
+    try {
+        const r = await fetch('/status');
+        const s = await r.json();
+        log(`✅ 서버 연결 성공 | ROS2: ${s.ros2 ? '연동됨' : '없음'}`);
+        log(`📡 서버 IP: ${s.local_ip}`);
+    } catch(e) {
+        log('❌ 서버 연결 실패: ' + e.message);
+        setStatus('❌ 서버 연결 실패', 'rgba(244,67,54,0.4)');
+        return;
+    }
+
+    // WebXR 지원 확인
+    if (!navigator.xr) {
+        log('❌ navigator.xr 없음 (WebXR 미지원)');
+        setStatus('❌ WebXR 미지원', 'rgba(244,67,54,0.4)');
+        return;
+    }
+    log('✅ navigator.xr 확인');
+
+    // AR/VR 지원 확인
+    try {
+        const arOk = await navigator.xr.isSessionSupported('immersive-ar');
+        const vrOk = await navigator.xr.isSessionSupported('immersive-vr');
+        log((arOk ? '✅' : '⚠️') + ' AR(패스스루): ' + (arOk ? '지원' : '미지원'));
+        log((vrOk ? '✅' : '❌') + ' VR: ' + (vrOk ? '지원' : '미지원'));
+        
+        if (vrOk) {
+            setStatus('✅ 검사 통과 - MR/VR 시작 가능!', 'rgba(76,175,80,0.4)');
+        }
+    } catch(e) {
+        log('⚠️ XR 지원 확인 실패: ' + e.message);
+    }
+}
+
+// ── XR 세션 공통 변수 ─────────────────────────────────────────
+let xrSession = null;
+let xrRefSpace = null;
+let gl = null;
+let frameCount = 0;
+let lastSendMs = 0;
+const SEND_HZ = 30;   // WiFi 환경에 맞춘 전송 주파수
+
+// ── 2단계: MR 시작 ────────────────────────────────────────────
+async function startAR() {
+    log('🌍 MR(패스스루) 세션 시작...');
+    try {
+        xrSession = await navigator.xr.requestSession('immersive-ar', {
+            optionalFeatures: ['local-floor']
+        });
+        log('✅ MR 세션 생성 성공!');
+        await setupXRSession(true);
+    } catch(e) {
+        log(`❌ MR 실패: ${e.name} - ${e.message}`);
+        if (e.name === 'NotSupportedError') {
+            log('⚠️ 패스스루 미지원 → VR 모드로 자동 전환...');
+            setTimeout(startVR, 800);
+        }
+    }
+}
+
+// ── 3단계: VR 시작 ────────────────────────────────────────────
+async function startVR() {
+    log('🥽 VR 세션 시작...');
+    try {
+        xrSession = await navigator.xr.requestSession('immersive-vr', {
+            optionalFeatures: ['local-floor']
+        });
+        log('✅ VR 세션 생성 성공!');
+        await setupXRSession(false);
+    } catch(e) {
+        log(`❌ VR 실패: ${e.name} - ${e.message}`);
+    }
+}
+
+// ── XR 세션 공통 설정 ─────────────────────────────────────────
+async function setupXRSession(isAR) {
+    // WebGL 컨텍스트 생성
+    const canvas = document.createElement('canvas');
+    gl = canvas.getContext('webgl', { xrCompatible: true });
+    if (!gl) throw new Error('WebGL 컨텍스트 생성 실패');
+
+    // XRWebGLLayer 연결
+    const layer = new XRWebGLLayer(xrSession, gl);
+    await xrSession.updateRenderState({ baseLayer: layer });
+    log(`✅ WebGL 레이어 연결 (${isAR ? 'MR' : 'VR'} 모드)`);
+
+    // 참조 공간 설정
+    try {
+        xrRefSpace = await xrSession.requestReferenceSpace('local-floor');
+        log('✅ local-floor 참조 공간');
+    } catch(_) {
+        xrRefSpace = await xrSession.requestReferenceSpace('local');
+        log('✅ local 참조 공간 (fallback)');
+    }
+
+    // UI 전환
+    ['btn-check','btn-ar','btn-vr','btn-reset','log','status']
+        .forEach(id => {
+            const el = document.getElementById(id);
+            if (el) el.style.display = 'none';
+        });
+    poseEl.style.display = 'block';
+    document.body.style.background = isAR ? 'transparent' : '#111';
+
+    // 세션 종료 처리
+    xrSession.addEventListener('end', () => {
+        log(`${isAR ? 'MR' : 'VR'} 세션 종료`);
+        location.reload();
+    });
+
+    // 렌더링 루프 시작
+    xrSession.requestAnimationFrame((t, f) => onXRFrame(t, f, isAR));
+    log(`🚀 ${isAR ? 'MR' : 'VR'} 컨트롤러 추적 시작!`);
+}
+
+// ── XR 프레임 루프 ────────────────────────────────────────────
+function onXRFrame(time, frame, isAR) {
+    if (!xrSession || !gl) return;
+    xrSession.requestAnimationFrame((t, f) => onXRFrame(t, f, isAR));
+
+    // 화면 클리어 (무한 로딩 방지)
+    gl.bindFramebuffer(gl.FRAMEBUFFER, xrSession.renderState.baseLayer.framebuffer);
+    gl.clearColor(0, 0, 0, isAR ? 0.0 : 1.0);
+    gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+
+    // 30Hz 전송 제한
+    if (time - lastSendMs < 1000 / SEND_HZ) return;
+    lastSendMs = time;
+
+    // 오른손 컨트롤러 추적
+    for (const src of xrSession.inputSources) {
+        if (src.handedness !== 'right' || !src.gripSpace) continue;
+        const pose = frame.getPose(src.gripSpace, xrRefSpace);
+        if (!pose) continue;
+
+        const p = pose.transform.position;
+        const o = pose.transform.orientation;
+
+        // 포즈 디스플레이 업데이트
+        frameCount++;
+        if (frameCount % 30 === 0) {
+            poseEl.textContent = 
+                `📍 R: x=${p.x.toFixed(3)} y=${p.y.toFixed(3)} z=${p.z.toFixed(3)} | ${frameCount}f`;
         }
 
-    def _pos_to_dict(self, pos, frame):
-        return {
-            'x': float(pos[0]), 'y': float(pos[1]), 'z': float(pos[2]),
-            'qx': frame.qx, 'qy': frame.qy, 'qz': frame.qz, 'qw': frame.qw
-        }
+        sendPose('right', p.x, p.y, p.z, o.x, o.y, o.z, o.w);
+        break;
+    }
+}
 
-    def _raw_dict(self, frame):
-        return {
-            'x': frame.x, 'y': frame.y, 'z': frame.z,
-            'qx': frame.qx, 'qy': frame.qy, 'qz': frame.qz, 'qw': frame.qw
+// ── 포즈 전송 ─────────────────────────────────────────────────
+function sendPose(hand, x, y, z, qx, qy, qz, qw) {
+    fetch('/pose', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+            hand, x, y, z, qx, qy, qz, qw,
+            timestamp: Date.now() / 1000
+        })
+    })
+    .then(r => r.json())
+    .then(result => {
+        if (result.status === 'watchdog_home') {
+            console.warn('⚠️ 워치독 발동 - 홈 복귀');
+            poseEl.textContent = '⚠️ 워치독 - 홈 복귀 중...';
         }
+    })
+    .catch(e => console.debug('전송 에러:', e.message));
+}
+
+// ── 기준점 재설정 ─────────────────────────────────────────────
+function resetOrigin() {
+    log('🔄 기준점 재설정 요청...');
+    fetch('/reset', { method: 'POST' })
+        .then(r => r.json())
+        .then(() => log('✅ 기준점 재설정 완료'))
+        .catch(() => log('⚠️ 재설정 실패'));
+}
+
+// ── 초기화 ────────────────────────────────────────────────────
+log('✅ 페이지 로드 완료');
+setStatus('✅ 준비 완료 - 1단계 검사를 시작하세요');
+</script>
+</body>
+</html>"""
+
+# ── 메인 실행부 ──────────────────────────────────────────────
+if __name__ == '__main__':
+    print("=" * 60)
+    print("🚀 G1 MR Teleoperation 서버 시작")
+    print("=" * 60)
+
+    # ROS2 백그라운드 스레드 시작
+    if ROS2_AVAILABLE:
+        ros_thread = threading.Thread(target=ros_spin_thread, daemon=True)
+        ros_thread.start()
+        time.sleep(1.5)
+        print("✅ ROS2 노드 시작 완료")
+
+    # HTTPS 서버 시작
+    httpd = HTTPServer((HOST, PORT), Handler)
+    ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    ctx.load_cert_chain(certfile='cert.pem', keyfile='key.pem')
+    httpd.socket = ctx.wrap_socket(httpd.socket, server_side=True)
+
+    # 네트워크 정보 출력
+    local_ip = get_local_ip()
+    print(f"\n📡 네트워크 정보:")
+    print(f"   Ubuntu PC IP : {local_ip}")
+    print(f"   Quest3 접속  : https://{local_ip}:{PORT}")
+    print(f"   상태 확인    : https://{local_ip}:{PORT}/status")
+    print(f"\n⚠️  Quest3에서 '고급 → 계속 진행' 클릭 필요")
+    print(f"🛑 종료: Ctrl+C\n")
+
+    try:
+        httpd.serve_forever()
+    except KeyboardInterrupt:
+        print("\n🛑 서버 종료")
