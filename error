@@ -1,63 +1,13 @@
-(base) unitree@ubuntu:~$ ls -la /opt/ros/
-ls: cannot access '/opt/ros/': No such file or directory
-(base) unitree@ubuntu:~$ ls -la /home/unitree/ros2_ws/ 2>/dev/null
-(base) unitree@ubuntu:~$ ls -la /home/unitree/unitree_ros2/ 2>/dev/null
-(base) unitree@ubuntu:~$ find /opt /home -name "setup.bash" 2>/dev/null | grep ros
-/home/unitree/unitree/Odometer_service/devel/.private/vikit_ros/setup.bash
-/home/unitree/unitree/Odometer_service/devel/.private/svo_ros/setup.bash
-/home/unitree/unitree/Odometer_service/build/vikit_ros/catkin_generated/installspace/setup.bash
-/home/unitree/unitree/Odometer_service/build/vikit_ros/atomic_configure/setup.bash
-/home/unitree/unitree/Odometer_service/build/svo_ros/catkin_generated/installspace/setup.bash
-/home/unitree/unitree/Odometer_service/build/svo_ros/atomic_configure/setup.bash
-(base) unitree@ubuntu:~$ ps aux | grep -E "ros|unitree|g1" | grep -v grep
-unitree     1269  0.0  0.0  18888  8856 ?        Ss   08:57   0:00 /lib/systemd/systemd --user
-unitree     1271  0.0  0.0 170008  5204 ?        S    08:57   0:00 (sd-pam)
-unitree     1810  0.0  0.0   7812  3448 ?        Ss   08:57   0:00 /usr/bin/dbus-daemon --session --address=systemd: --nofork --nopidfile --systemd-activation --syslog-only
-unitree     2406 81.7  1.1 19234088 174864 ?     Ssl  08:57  17:47 python jetson_realsense_stream.py --client-ip 192.168.123.222
-root        3188  0.0  0.0  14768  7536 ?        Ss   09:12   0:00 sshd: unitree [priv]
-unitree     3235  0.0  0.0  15288  5696 ?        S    09:12   0:00 sshd: unitree@pts/0
-unitree     3236  0.0  0.0  10652  4808 pts/0    Ss   09:12   0:00 -bash
-unitree     3311  0.0  0.0  11076  2664 pts/0    R+   09:19   0:00 ps aux
-(base) unitree@ubuntu:~$ ls -la /opt/unitree/ 2>/dev/null
-(base) unitree@ubuntu:~$ find /home/unitree -name "*sdk*" -type d 2>/dev/null
-/home/unitree/unitree_sdk2
-/home/unitree/unitree_sdk2/build/example/h1/CMakeFiles/h1_arm_sdk_dds_example.dir
-/home/unitree/unitree_sdk2/build/example/h1/CMakeFiles/h1_2_arm_sdk_dds_example.dir
-/home/unitree/unitree_sdk2/build/example/g1/CMakeFiles/g1_arm5_sdk_dds_example.dir
-/home/unitree/unitree_sdk2/build/example/g1/CMakeFiles/g1_arm7_sdk_dds_example.dir
-/home/unitree/miniforge3/envs/g1_slam/lib/python3.10/site-packages/unitree_sdk2py-1.0.1.dist-info
-/home/unitree/miniforge3/envs/tv/lib/python3.10/site-packages/rerun_sdk
-/home/unitree/miniforge3/envs/tv/lib/python3.10/site-packages/rerun_sdk-0.20.1.dist-info
-/home/unitree/Desktop/dyson/unitree_g1_vibes/vcpkg/scripts/test_ports/vcpkg-ci-mdl-sdk
-/home/unitree/Desktop/dyson/unitree_g1_vibes/vcpkg/ports/vulkan-sdk-components
-/home/unitree/Desktop/dyson/unitree_g1_vibes/vcpkg/ports/networkdirect-sdk
-/home/unitree/Desktop/dyson/unitree_g1_vibes/vcpkg/ports/aws-c-sdkutils
-/home/unitree/Desktop/dyson/unitree_g1_vibes/vcpkg/ports/ms-ifc-sdk
-/home/unitree/Desktop/dyson/unitree_g1_vibes/vcpkg/ports/mdl-sdk
-/home/unitree/Desktop/dyson/unitree_g1_vibes/vcpkg/ports/directxsdk
-/home/unitree/Desktop/dyson/unitree_g1_vibes/vcpkg/ports/aliyun-oss-cpp-sdk
-/home/unitree/Desktop/dyson/unitree_g1_vibes/vcpkg/ports/cpprestsdk
-/home/unitree/Desktop/dyson/unitree_g1_vibes/vcpkg/ports/discord-game-sdk
-/home/unitree/Desktop/dyson/unitree_g1_vibes/vcpkg/ports/azure-kinect-sensor-sdk
-/home/unitree/Desktop/dyson/unitree_g1_vibes/vcpkg/ports/rerun-sdk
-/home/unitree/Desktop/dyson/unitree_g1_vibes/vcpkg/ports/azure-iot-sdk-c
-/home/unitree/Desktop/dyson/unitree_g1_vibes/vcpkg/ports/kinectsdk2
-/home/unitree/Desktop/dyson/unitree_g1_vibes/vcpkg/ports/unimail-cpp-sdk
-/home/unitree/Desktop/dyson/unitree_g1_vibes/vcpkg/ports/amd-adl-sdk
-/home/unitree/Desktop/dyson/unitree_g1_vibes/vcpkg/ports/irsdkcpp
-/home/unitree/Desktop/dyson/unitree_g1_vibes/vcpkg/ports/kinectsdk1
-/home/unitree/Desktop/dyson/unitree_g1_vibes/vcpkg/ports/aliyun-oss-c-sdk
-/home/unitree/Desktop/dyson/unitree_g1_vibes/vcpkg/ports/aws-sdk-cpp
-/home/unitree/Desktop/dyson/unitree_g1_vibes/vcpkg/ports/asiosdk
-/home/unitree/Desktop/dyson/unitree_g1_vibes/vcpkg/ports/dxsdk-d3dx
-/home/unitree/Desktop/dyson/unitree_g1_vibes/vcpkg/ports/vamp-sdk
-/home/unitree/Desktop/dyson/unitree_g1_vibes/vcpkg/ports/vst3sdk
-/home/unitree/Desktop/dyson/unitree_g1_vibes/unitree_sdk2_python
-/home/unitree/Desktop/dyson/unitree_g1_vibes/unitree_sdk2_python/unitree_sdk2py
-/home/unitree/Desktop/dyson/unitree_g1_vibes/unitree_sdk2_python/unitree_sdk2py.egg-info
-/home/unitree/Desktop/dyson/unitree_g1_vibes/Livox-SDK2/sdk_core
-/home/unitree/Desktop/dyson/unitree_g1_vibes/Livox-SDK2/build/sdk_core
-/home/unitree/Desktop/dyson/unitree_g1_vibes/Livox-SDK2/build/sdk_core/CMakeFiles/livox_lidar_sdk_static.dir
-/home/unitree/Desktop/dyson/unitree_g1_vibes/Livox-SDK2/build/sdk_core/CMakeFiles/livox_lidar_sdk_shared.dir
-/home/unitree/unitree_sdk2-main
-/home/unitree/unitree_sdk2-main/build/CMakeFiles/h1_arm_sdk_dds_example.dir
+(tv_env) (base) lgit@lgit-17Z90R-EP7NL:~/TeleVision$ python3 g1_bridge_node.py
+✅ Unitree SDK2 로드 성공
+[INFO] [1777344441.161465446] [g1_bridge_node]: 🌐 DDS 인터페이스: AUTO
+Traceback (most recent call last):
+  File "/home/lgit/TeleVision/g1_bridge_node.py", line 160, in <module>
+    main()
+  File "/home/lgit/TeleVision/g1_bridge_node.py", line 149, in main
+    node = G1BridgeNode()
+  File "/home/lgit/TeleVision/g1_bridge_node.py", line 43, in __init__
+    self._init_dds()
+  File "/home/lgit/TeleVision/g1_bridge_node.py", line 69, in _init_dds
+    ChannelFactory.Instance().Init(0, iface)
+AttributeError: type object 'ChannelFactory' has no attribute 'Instance'
