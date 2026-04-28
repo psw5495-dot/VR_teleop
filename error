@@ -1,20 +1,16 @@
-# G1 로봇 연결 테스트
-ping 192.168.123.26
+# 1. 실제 설치된 ROS 버전 확인
+ls -la /opt/ros/
 
-# G1 로봇에 SSH 접속
-ssh unitree@192.168.123.26
+# 2. Unitree 작업 공간 확인
+ls -la /home/unitree/ros2_ws/ 2>/dev/null
+ls -la /home/unitree/unitree_ros2/ 2>/dev/null
 
-# G1 내부에서 실행
-source /opt/ros/humble/setup.bash
+# 3. 시스템 전체 ROS setup 파일 탐색
+find /opt /home -name "setup.bash" 2>/dev/null | grep ros
 
-# G1 ROS 2 드라이버 실행 (G1 모델에 따라 명령어 다름)
-ros2 launch unitree_ros2 g1_bringup.launch.py
-# 또는
-ros2 run unitree_ros2 g1_driver_node
+# 4. 현재 실행 중인 ROS/Unitree 프로세스 확인
+ps aux | grep -E "ros|unitree|g1" | grep -v grep
 
-# 토픽 확인
-ros2 topic list | grep -i "joint\|arm"
-
--bash: /opt/ros/foxy/setup.bash: No such file or directory
-not found: "/opt/ros/foxy/local_setup.bash"
-
+# 5. Unitree SDK2 설치 확인
+ls -la /opt/unitree/ 2>/dev/null
+find /home/unitree -name "*sdk*" -type d 2>/dev/null
