@@ -1,42 +1,53 @@
-def calculate_crc_manual(data_bytes):
-    """수동 CRC 계산 (SDK CRC 모듈 없을 때)"""
-    crc = 0xFFFFFFFF
-    for byte in data_bytes:
-        crc ^= byte
-        for _ in range(8):
-            if crc & 1:
-                crc = (crc >> 1) ^ 0xEDB88320
-            else:
-                crc >>= 1
-    return crc ^ 0xFFFFFFFF
-
-
-def set_low_cmd_crc(low_cmd):
-    """LowCmd 메시지에 CRC 설정"""
-    global CRC_AVAILABLE
+def joint_callback(self, msg):
+    """ROS2 JointState → G1 DDS 명령 변환 (CRC 포함)"""
+    if self.cmd_pub is None or self.low_cmd is None:
+        self._log_simulation(msg)
+        return
     
-    if CRC_AVAILABLE:
-        try:
-            crc_calc = CRC()
-            low_cmd.crc = crc_calc.Crc(low_cmd)
-            return True
-        except Exception as e:
-            print(f"CRC 계산 실패: {e}")
-    
-    # 수동 CRC 계산 (근사치)
     try:
-        # LowCmd 구조체를 바이트로 변환 (근사)
-        data = bytearray()
-        data.extend(low_cmd.mode_pr.to_bytes(1, 'little'))
-        data.extend(low_cmd.mode_machine.to_bytes(1, 'little'))
+        matched_joints = 0
         
-        for motor_cmd in low_cmd.motor_cmd:
-            data.extend(int(motor_cmd.mode).to_bytes(1, 'little'))
-            data.extend(int(motor_cmd.q * 1000).to_bytes(4, 'little', signed=True))
-            data.extend(int(motor_cmd.kp * 100).to_bytes(4, 'little', signed=True))
+        # 관절 매핑 (기존 코드 동일)
+        for joint_name, motor_idx in G1_RIGHT_ARM_MOTOR_IDX.items():
+            if joint_name not in msg.name:
+                continue
+            
+            j_idx = msg.name.index(joint_name)
+            if j_idx >= len(msg.position):
+                continue
+            
+            target_q = float(msg.position[j_idx])
+            
+            if abs(target_q) > np.pi:
+                self.get_logger().warn(f'⚠️ {joint_name}: {target_q:.3f}rad 범위 초과')
+                continue
+            
+            # 모터 명령 업데이트
+            self.low_cmd.motor_cmd[motor_idx] = create_motor_cmd(
+                mode=1, q=target_q, dq=0.0, tau=0.0,
+                kp=self.KP, kd=self.KD, reserve=0
+            )
+            matched_joints += 1
         
-        low_cmd.crc = calculate_crc_manual(data) & 0xFFFFFFFF
-        return True
-    except Exception:
-        low_cmd.crc = 0x12345678  # 기본 더미 CRC
-        return False
+        if matched_joints == 0:
+            return
+        
+        # ⭐️ CRC 계산 (핵심!)
+        crc_success = set_low_cmd_crc(self.low_cmd)
+        
+        # G1으로 DDS 전송
+        self.cmd_pub.Write(self.low_cmd)
+        self.cmd_count += 1
+        
+        # 주기적 로그 (CRC 상태 포함)
+        now = time.time()
+        if now - self.last_log > 5.0:
+            crc_status = "✅" if crc_success else "⚠️"
+            self.get_logger().info(
+                f'{crc_status} DDS 전송 {self.cmd_count}회 | '
+                f'매칭: {matched_joints}개 | CRC: 0x{self.low_cmd.crc:08X}'
+            )
+            self.last_log = now
+            
+    except Exception as e:
+        self.get_logger().error(f'❌ joint_callback 에러: {e}')
