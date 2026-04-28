@@ -1,0 +1,26 @@
+# ── 터미널 1: IK 노드 ─────────────────────────────────────────
+source /opt/ros/humble/setup.bash
+cd ~/g1_teleop
+python3 g1_ik_node.py
+
+
+# ── 터미널 2: DDS 브릿지 ─────────────────────────────────────
+source /opt/ros/humble/setup.bash
+cd ~/g1_teleop
+python3 g1_bridge_node.py
+
+
+# ── 터미널 3: WebXR 서버 ─────────────────────────────────────
+source /opt/ros/humble/setup.bash
+cd ~/g1_teleop
+python3 serve_webxr.py
+
+# 출력 예시:
+# Ubuntu PC IP : 192.168.1.100
+# Quest3 접속  : https://192.168.1.100:8443
+
+
+# ── 터미널 4: 모니터링 (선택) ────────────────────────────────
+source /opt/ros/humble/setup.bash
+ros2 topic list
+ros2 topic echo /g1/target_pose
