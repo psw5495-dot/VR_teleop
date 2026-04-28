@@ -1,187 +1,31 @@
-#!/usr/bin/env python3
-# ~/TeleVision/g1_bridge_node.py (수정 버전 1)
+# 1. SDK 버전 확인
+pip show unitree_sdk2py
 
-import rclpy
-from rclpy.node import Node
-from sensor_msgs.msg import JointState
-import numpy as np
-import time
-import subprocess
+# 2. ChannelFactory 실제 메서드 확인
+python3 -c "
+from unitree_sdk2py.core.channel import ChannelFactory
+print('ChannelFactory 메서드:', [m for m in dir(ChannelFactory) if not m.startswith('_')])
+"
 
-# ── Unitree SDK2 임포트 (수정된 부분) ─────────────────────────
+# 3. 전체 channel 모듈 확인
+python3 -c "
+from unitree_sdk2py.core import channel
+print('Channel 모듈 내용:', [item for item in dir(channel) if not item.startswith('_')])
+"
+
+# 4. LowCmd_ 임포트 경로 확인
+python3 -c "
 try:
-    # ⭐️ 방법 1: ChannelFactoryInitialize 사용 (가장 일반적)
-    from unitree_sdk2py.core.channel import ChannelFactoryInitialize, ChannelPublisher
     from unitree_sdk2py.idl.unitree_hg.msg.dds_ import LowCmd_
-    SDK_AVAILABLE = True
-    print("✅ Unitree SDK2 로드 성공 (ChannelFactoryInitialize 방식)")
+    print('✅ LowCmd_ 경로 1 성공')
 except ImportError:
     try:
-        # ⭐️ 방법 2: InitChannels 사용 (대안)
-        from unitree_sdk2py.core.channel import InitChannels, ChannelPublisher
-        from unitree_sdk2py.idl.unitree_hg.msg.dds_ import LowCmd_
-        SDK_AVAILABLE = True
-        print("✅ Unitree SDK2 로드 성공 (InitChannels 방식)")
-    except ImportError as e:
-        SDK_AVAILABLE = False
-        print(f"⚠️ Unitree SDK2 없음: {e}")
-
-# G1 모터 인덱스 매핑
-G1_RIGHT_ARM_MOTOR_IDX = {
-    'right_shoulder_pitch_joint': 15,
-    'right_shoulder_roll_joint' : 16,
-    'right_shoulder_yaw_joint'  : 17,
-    'right_elbow_pitch_joint'   : 18,
-    'right_wrist_roll_joint'    : 19,
-    'right_wrist_pitch_joint'   : 20,
-    'right_wrist_yaw_joint'     : 21,
-}
-
-class G1BridgeNode(Node):
-    def __init__(self):
-        super().__init__('g1_bridge_node')
-        
-        if SDK_AVAILABLE:
-            self._init_dds()
-        else:
-            self.get_logger().warn('⚠️ DDS 없이 실행 (시뮬레이션 모드)')
-            self.cmd_pub = None
-        
-        self.subscription = self.create_subscription(
-            JointState, '/g1/arm/joint_commands', self.joint_callback, 10)
-        
-        self.KP = 40.0
-        self.KD = 1.0
-        self.MAX_TORQUE = 10.0
-        self.cmd_count = 0
-        self.last_log = time.time()
-        
-        self.get_logger().info('✅ G1 브릿지 노드 시작')
-        self.get_logger().info('📡 /g1/arm/joint_commands 구독 중...')
-
-    def _init_dds(self):
-        """DDS 채널 초기화 - 여러 방법 순차 시도"""
-        iface = self._detect_network_interface()
-        self.get_logger().info(f'🌐 DDS 인터페이스: {iface}')
-        
-        # ⭐️ 방법들을 순서대로 시도
-        init_success = False
-        
-        # 시도 1: ChannelFactoryInitialize
+        from unitree_sdk2py.idl.unitree_go.msg.dds_ import LowCmd_
+        print('✅ LowCmd_ 경로 2 성공')
+    except ImportError:
         try:
-            from unitree_sdk2py.core.channel import ChannelFactoryInitialize
-            ChannelFactoryInitialize(0, iface)
-            init_success = True
-            print("✅ DDS 초기화: ChannelFactoryInitialize 방식")
-        except (ImportError, AttributeError):
-            pass
-        
-        # 시도 2: InitChannels
-        if not init_success:
-            try:
-                from unitree_sdk2py.core.channel import InitChannels
-                InitChannels(0, iface)
-                init_success = True
-                print("✅ DDS 초기화: InitChannels 방식")
-            except (ImportError, AttributeError):
-                pass
-        
-        # 시도 3: ChannelFactory 클래스 직접 사용
-        if not init_success:
-            try:
-                from unitree_sdk2py.core.channel import ChannelFactory
-                factory = ChannelFactory(0, iface)
-                init_success = True
-                print("✅ DDS 초기화: ChannelFactory 인스턴스 방식")
-            except (ImportError, AttributeError, TypeError):
-                pass
-        
-        if not init_success:
-            raise RuntimeError("모든 DDS 초기화 방법 실패")
-        
-        # LowCmd 퍼블리셔 생성
-        self.cmd_pub = ChannelPublisher("rt/lowcmd", LowCmd_)
-        self.cmd_pub.Init()
-        
-        # LowCmd 메시지 초기화
-        self.low_cmd = LowCmd_()
-        for i in range(35):
-            self.low_cmd.motor_cmd[i].q   = 0.0
-            self.low_cmd.motor_cmd[i].dq  = 0.0
-            self.low_cmd.motor_cmd[i].kp  = 0.0
-            self.low_cmd.motor_cmd[i].kd  = 0.5
-            self.low_cmd.motor_cmd[i].tau = 0.0
-
-    def _detect_network_interface(self):
-        """네트워크 인터페이스 자동 감지"""
-        try:
-            result = subprocess.run(
-                ['ip', 'route', 'get', '8.8.8.8'],
-                capture_output=True, text=True, timeout=3
-            )
-            for token in result.stdout.split():
-                if token.startswith(('eth', 'enp', 'eno', 'ens', 'wl')):
-                    return token
-        except Exception:
-            pass
-        return "AUTO"
-
-    def joint_callback(self, msg):
-        """ROS2 JointState → G1 DDS 명령 변환"""
-        try:
-            if not SDK_AVAILABLE or self.cmd_pub is None:
-                self._log_simulation(msg)
-                return
-            
-            # 관절 매핑 및 명령 설정
-            for joint_name, motor_idx in G1_RIGHT_ARM_MOTOR_IDX.items():
-                if joint_name not in msg.name:
-                    continue
-                
-                j_idx = msg.name.index(joint_name)
-                if j_idx >= len(msg.position):
-                    continue
-                
-                target_q = float(msg.position[j_idx])
-                
-                self.low_cmd.motor_cmd[motor_idx].q   = target_q
-                self.low_cmd.motor_cmd[motor_idx].dq  = 0.0
-                self.low_cmd.motor_cmd[motor_idx].kp  = self.KP
-                self.low_cmd.motor_cmd[motor_idx].kd  = self.KD
-                self.low_cmd.motor_cmd[motor_idx].tau = 0.0
-            
-            # G1으로 DDS 전송
-            self.cmd_pub.Write(self.low_cmd)
-            self.cmd_count += 1
-            
-            # 주기적 로그
-            now = time.time()
-            if now - self.last_log > 5.0:
-                self.get_logger().info(
-                    f'✅ DDS 전송 {self.cmd_count}회 | 관절: {len(msg.position)}개')
-                self.last_log = now
-                
-        except Exception as e:
-            self.get_logger().error(f'❌ 브릿지 에러: {e}')
-
-    def _log_simulation(self, msg):
-        """시뮬레이션 모드 로그"""
-        now = time.time()
-        if now - self.last_log > 3.0:
-            pos_str = ', '.join(f'{p:.3f}' for p in msg.position[:3])
-            self.get_logger().info(f'🔵 [시뮬] 관절 명령: [{pos_str}...]')
-            self.last_log = now
-
-def main():
-    rclpy.init()
-    node = G1BridgeNode()
-    try:
-        rclpy.spin(node)
-    except KeyboardInterrupt:
-        node.get_logger().info('🛑 브릿지 노드 종료')
-    finally:
-        node.destroy_node()
-        rclpy.shutdown()
-
-if __name__ == '__main__':
-    main()
+            from unitree_sdk2py.idl.default import unitree_hg_msg_dds__LowCmd_ as LowCmd_
+            print('✅ LowCmd_ 경로 3 성공')
+        except ImportError:
+            print('❌ 모든 LowCmd_ 경로 실패')
+"
