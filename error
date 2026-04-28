@@ -14,3 +14,8 @@ ros2 run unitree_ros2 g1_driver_node
 
 # 토픽 확인
 ros2 topic list | grep -i "joint\|arm"
+
+
+Last login: Thu Jan  1 10:11:25 1970 from 192.168.123.233
+ros:foxy(1) noetic(2) ?
+
