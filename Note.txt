@@ -1,22 +1,119 @@
-# 1. Ubuntu PC의 네트워크 정보 확인
-ip addr show
-ip route | grep default
+# ~/g1_teleop/teleop_pipeline.py
+"""
+VR 컨트롤러 포즈 → G1 목표 좌표 변환 파이프라인
+공유기 네트워크 환경 최적화
+"""
 
-# 유선 인터페이스(eth0, enp3s0 등)의 IP 주소 확인
-# 예시: 192.168.1.100 ← 이 IP를 Quest3에서 사용
+import time
+import numpy as np
+from dataclasses import dataclass, field
+from typing import Optional, Tuple
 
-# 2. 작업 디렉터리 생성
-mkdir -p ~/g1_teleop && cd ~/g1_teleop
 
-# 3. Quest3 WebXR용 SSL 인증서 생성 (필수)
-openssl req -x509 -newkey rsa:4096 \
-    -keyout key.pem -out cert.pem \
-    -days 365 -nodes \
-    -subj "/CN=g1-teleop"
+@dataclass
+class TeleopConfig:
+    pos_scale: float = 0.5
+    robot_home_pos: Tuple[float, float, float] = (0.35, -0.20, 0.45)
+    max_dx: float = 0.10
+    max_dy: float = 0.10
+    max_dz: float = 0.10
+    ema_alpha: float = 0.15
+    watchdog_timeout_s: float = 0.3
+    axis_sign: Tuple[float, float, float] = (1.0, -1.0, -1.0)
 
-# 4. 방화벽 포트 개방
-sudo ufw allow 8443/tcp    # WebXR HTTPS
-sudo ufw allow 7400:7500/udp  # DDS 통신 (G1용)
 
-# 5. 필요 패키지 설치
-pip install unitree_sdk2py pin numpy
+@dataclass
+class VRFrame:
+    hand: str
+    x: float
+    y: float
+    z: float
+    qx: float = 0.0
+    qy: float = 0.0
+    qz: float = 0.0
+    qw: float = 1.0
+    timestamp: float = field(default_factory=time.time)
+
+
+def parse_frame_from_json(data: dict) -> VRFrame:
+    return VRFrame(
+        hand=data.get('hand', 'right'),
+        x=float(data.get('x', 0)),
+        y=float(data.get('y', 0)),
+        z=float(data.get('z', 0)),
+        qx=float(data.get('qx', 0)),
+        qy=float(data.get('qy', 0)),
+        qz=float(data.get('qz', 0)),
+        qw=float(data.get('qw', 1)),
+        timestamp=float(data.get('timestamp', time.time()))
+    )
+
+
+class TeleopPipeline:
+    def __init__(self, cfg: TeleopConfig):
+        self.cfg = cfg
+        self.origin: Optional[np.ndarray] = None
+        self.filtered_pos = np.array(cfg.robot_home_pos, dtype=float)
+        self.last_recv_time = time.time()
+
+    def reset_origin(self):
+        """기준점 초기화"""
+        self.origin = None
+        self.filtered_pos = np.array(self.cfg.robot_home_pos, dtype=float)
+        print("🔄 기준점 초기화 완료")
+
+    def process(self, frame: VRFrame) -> dict:
+        """VRFrame → 필터링된 목표 좌표"""
+        now = time.time()
+        
+        # 워치독: 오래된 데이터 감지시 안전 위치로 복귀
+        if (now - frame.timestamp) > self.cfg.watchdog_timeout_s:
+            self.filtered_pos = np.array(self.cfg.robot_home_pos, dtype=float)
+            return {
+                'status': 'watchdog_home',
+                'target_pose': self._pos_to_dict(self.filtered_pos, frame),
+                'raw_vr_pose': self._raw_dict(frame)
+            }
+
+        self.last_recv_time = now
+        raw_pos = np.array([frame.x, frame.y, frame.z])
+
+        # 첫 프레임을 기준점으로 설정
+        if self.origin is None:
+            self.origin = raw_pos.copy()
+            print(f"📍 VR 기준점 설정: {self.origin}")
+
+        # 델타 계산 + 스케일링 + 축 방향 조정
+        delta = (raw_pos - self.origin) * \
+                np.array(self.cfg.axis_sign) * self.cfg.pos_scale
+
+        # 최대 변위 제한 (안전성)
+        delta = np.clip(
+            delta,
+            [-self.cfg.max_dx, -self.cfg.max_dy, -self.cfg.max_dz],
+            [ self.cfg.max_dx,  self.cfg.max_dy,  self.cfg.max_dz]
+        )
+
+        raw_target = np.array(self.cfg.robot_home_pos) + delta
+
+        # EMA 저역통과 필터 (떨림 제거)
+        alpha = self.cfg.ema_alpha
+        self.filtered_pos = alpha * raw_target + (1.0 - alpha) * self.filtered_pos
+
+        return {
+            'status': 'ok',
+            'target_pose': self._pos_to_dict(self.filtered_pos, frame),
+            'raw_vr_pose': self._raw_dict(frame)
+        }
+
+    def _pos_to_dict(self, pos, frame):
+        return {
+            'x': float(pos[0]), 'y': float(pos[1]), 'z': float(pos[2]),
+            'qx': frame.qx, 'qy': frame.qy, 'qz': frame.qz, 'qw': frame.qw
+        }
+
+    def _raw_dict(self, frame):
+        return {
+            'x': frame.x, 'y': frame.y, 'z': frame.z,
+            'qx': frame.qx, 'qy': frame.qy, 'qz': frame.qz, 'qw': frame.qw
+        }
