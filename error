@@ -1,13 +1,39 @@
-# 기존 (너무 좁음)
-self.workspace_limits = {
-    'x_min': 0.2, 'x_max': 0.8,
-    'y_min': -0.5, 'y_max': 0.5,
-    'z_min': 0.3, 'z_max': 1.2
-}
-
-# ⭐️ 수정 (VR 사용에 적합하게 넓힘)
-self.workspace_limits = {
-    'x_min': 0.05, 'x_max': 1.0,   # 0.2→0.05 (더 가까이 허용)
-    'y_min': -0.8, 'y_max': 0.8,   # ±0.5→±0.8 (더 넓게)
-    'z_min': 0.1, 'z_max': 1.5     # 0.3→0.1 (더 낮게 허용)
-}
+def _parse_right_arm_joints(self, urdf_path):
+    """오른팔 관절만 정확히 추출 (왼팔 완전 제외)"""
+    try:
+        tree = ET.parse(urdf_path)
+        root = tree.getroot()
+        
+        # ⭐️ G1 오른팔 표준 관절 이름 (순서 중요)
+        target_joints = [
+            'right_shoulder_pitch_joint',
+            'right_shoulder_roll_joint', 
+            'right_shoulder_yaw_joint',
+            'right_elbow_pitch_joint',    # elbow_joint → elbow_pitch_joint
+            'right_wrist_roll_joint',
+            'right_wrist_pitch_joint',
+            'right_wrist_yaw_joint'
+        ]
+        
+        # URDF에서 실제 존재하는 관절만 선택
+        valid_joints = []
+        for target_name in target_joints:
+            for joint in root.findall('joint'):
+                joint_name = joint.get('name', '')
+                joint_type = joint.get('type', '')
+                
+                # 정확한 이름 매치 + revolute/continuous 타입만
+                if (joint_name == target_name and 
+                    joint_type in ['revolute', 'continuous']):
+                    valid_joints.append(joint_name)
+                    break
+        
+        self.get_logger().info(f'✅ 필터링된 오른팔 관절 ({len(valid_joints)}개):')
+        for i, name in enumerate(valid_joints):
+            self.get_logger().info(f'   [{i}] {name}')
+            
+        return valid_joints
+        
+    except Exception as e:
+        self.get_logger().error(f'URDF 관절 파싱 에러: {e}')
+        return []
