@@ -1,39 +1,13 @@
-def _parse_right_arm_joints(self, urdf_path):
-    """오른팔 관절만 정확히 추출 (왼팔 완전 제외)"""
-    try:
-        tree = ET.parse(urdf_path)
-        root = tree.getroot()
-        
-        # ⭐️ G1 오른팔 표준 관절 이름 (순서 중요)
-        target_joints = [
-            'right_shoulder_pitch_joint',
-            'right_shoulder_roll_joint', 
-            'right_shoulder_yaw_joint',
-            'right_elbow_pitch_joint',    # elbow_joint → elbow_pitch_joint
-            'right_wrist_roll_joint',
-            'right_wrist_pitch_joint',
-            'right_wrist_yaw_joint'
-        ]
-        
-        # URDF에서 실제 존재하는 관절만 선택
-        valid_joints = []
-        for target_name in target_joints:
-            for joint in root.findall('joint'):
-                joint_name = joint.get('name', '')
-                joint_type = joint.get('type', '')
-                
-                # 정확한 이름 매치 + revolute/continuous 타입만
-                if (joint_name == target_name and 
-                    joint_type in ['revolute', 'continuous']):
-                    valid_joints.append(joint_name)
-                    break
-        
-        self.get_logger().info(f'✅ 필터링된 오른팔 관절 ({len(valid_joints)}개):')
-        for i, name in enumerate(valid_joints):
-            self.get_logger().info(f'   [{i}] {name}')
-            
-        return valid_joints
-        
-    except Exception as e:
-        self.get_logger().error(f'URDF 관절 파싱 에러: {e}')
-        return []
+source /opt/ros/humble/setup.bash
+
+# 1. 현재 활성화된 모든 토픽 확인
+ros2 topic list
+
+# 2. G1 관련 토픽 필터링
+ros2 topic list | grep -i "g1\|joint\|arm\|cmd\|command"
+
+# 3. joint_states 토픽 확인 (G1 연결 상태)
+ros2 topic echo /joint_states --once
+
+# 4. 우리가 보내는 토픽이 실제로 발행되는지 확인
+ros2 topic echo /g1/arm/joint_commands
