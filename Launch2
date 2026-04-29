@@ -24,3 +24,12 @@ python3 serve_webxr.py
 source /opt/ros/humble/setup.bash
 ros2 topic list
 ros2 topic echo /g1/target_pose
+
+
+
+
+ssh unitree@[G1_IP]
+# G1에서 실행
+sudo systemctl stop unitree_robot_state_publisher
+~/unitree_sdk2/script/enable_low_level_mode.sh
+
