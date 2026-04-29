@@ -1,13 +1,149 @@
-# 구체적인 스크립트 검색
-find /home/unitree -type f \( -name "*low*level*.sh" -o -name "*sdk*mode*.sh" -o -name "*sport*.sh" \) 2>/dev/null
-
-# 실행 가능한 바이너리 검색
-find /home/unitree -type f -executable 2>/dev/null | grep -E "low_level|sdk_mode|sport_mode"
-
-
-# 예시: 발견된 스크립트 실행 (실제 경로로 교체)
-chmod +x /home/unitree/unitree_sdk2/scripts/stop_sport_mode.sh
-./stop_sport_mode.sh
-
-# 또는
-bash /home/unitree/unitree_sdk2/bin/enable_low_level_mode.sh
+(base) unitree@ubuntu:~$ ls -la
+total 324
+drwxr-xr-x  42 unitree unitree  4096 Mar  9  2026 .
+drwxr-xr-x   5 root    root     4096 Apr  1  2024 ..
+-rw-rw-r--   1 unitree unitree 11171 Mar 27  2026 .99-realsense-libusb.rules
+drwxrwxr-x   3 unitree unitree  4096 Aug 11  2025 anaconda3
+-rw-r--r--   1 root    root      109 Mar  9  2026 apt
+-rw-------   1 unitree unitree 37963 Jan  2 09:12 .bash_history
+-rw-r--r--   1 unitree unitree   220 Sep  8  2022 .bash_logout
+-rw-r--r--   1 unitree unitree  4902 Aug 11  2025 .bashrc
+drwxr-xr-x  22 unitree unitree  4096 Aug 11  2025 .cache
+drwxrwxr-x   3 unitree unitree  4096 Sep  4  2023 .cmake
+drwxrwxr-x   2 unitree unitree  4096 Aug 11  2025 .conda
+drwx------  25 unitree unitree  4096 Aug 12  2025 .config
+drwxrwxr-x  17 unitree unitree  4096 Aug 11  2025 cyclonedds
+drwxrwxr-x   6 unitree unitree  4096 Feb  2  1970 cyclonedds_ws
+drwx------   3 unitree unitree  4096 Nov  7  2023 .dbus
+drwxr-xr-x   3 unitree unitree  4096 Jul 17  2025 Desktop
+drwxr-xr-x   4 unitree unitree  4096 May 29  2025 Documents
+drwxr-xr-x   4 unitree unitree  4096 Dec  1  2025 Downloads
+drwx------   3 unitree unitree  4096 Jun 11  2025 .gnupg
+-rwxrwxrwx   1 unitree unitree  1432 Jan 15  2025 gpio_test.sh
+drwxrwxr-x   2 unitree unitree  4096 Sep  8  2025 image_server
+-rw-r--r--   1 root    root      109 Mar  9  2026 install
+drwxrwxr-x  17 unitree unitree  4096 Mar  9  2026 librealsense
+-rw-r--r--   1 root    root      109 Mar  9  2026 librealsense2-utils
+drwxrwxr-x   3 unitree unitree  4096 Mar  9  2026 librealsense_build
+drwxr-xr-x   5 unitree unitree  4096 Aug 11  2025 .local
+drwxrwxr-x   3 unitree unitree  4096 Aug 11  2025 miniconda3
+drwxrwxr-x  18 unitree unitree  4096 Aug 11  2025 miniforge3
+-rw-r--r--   1 root    root      109 Mar  9  2026 mkdir
+drwx------   4 unitree unitree  4096 Sep  1  2023 .mozilla
+drwxrwxr-x   3 unitree unitree  4096 Feb 10  2026 mpsb
+drwxr-xr-x   2 unitree unitree  4096 Sep  8  2022 Music
+-rwxr-xr-x   1 unitree unitree    87 Jun  5  2023 nomachine.sh
+drwx------   3 unitree unitree  4096 May 29  2025 .nv
+drwx------ 166 unitree unitree 20480 Jan  1 09:00 .nx
+drwxr-xr-x   2 unitree unitree  4096 Jul 21  2025 Pictures
+drwxrwxr-x   3 unitree unitree  4096 Dec  1  2025 .pki
+-rw-r--r--   1 unitree unitree   807 Sep  8  2022 .profile
+drwxr-xr-x   2 unitree unitree  4096 Sep  8  2022 Public
+-rw-rw-r--   1 unitree unitree   206 Feb 10  2026 pyrealsence.py
+drwx------   2 unitree unitree  4096 Nov  7  2023 .qt
+-rw-rw-r--   1 unitree unitree  7903 Mar 27  2026 .realsense-config.json
+drwxrwxr-x   4 unitree unitree  4096 May 16  2025 .ros
+drwxrwxr-x   2 unitree unitree  4096 Sep  4  2023 .rviz
+drwxrwxr-x   2 unitree unitree  4096 May 20  2025 .rviz2
+-rw-rw-r--   1 unitree unitree     0 Aug 12  2025 .selected_editor
+drwx------   2 unitree unitree  4096 Jan  2 09:08 .ssh
+-rw-r--r--   1 unitree unitree     0 Sep  8  2022 .sudo_as_admin_successful
+drwxr-xr-x   2 unitree unitree  4096 Sep  8  2022 Templates
+drwx------   4 unitree unitree  4096 Feb 22  1970 .thunderbird
+-rwxr-xr-x   1 unitree unitree  1533 Feb 18  2024 tmp_NV_L4T_OPENCV_RUNTIME_TARGET_POST_INSTALL_COMP.cai_kun.sh
+drwxrwxr-x   4 unitree unitree  4096 Jul 16  2024 unitree
+drwxrwxr-x  11 unitree unitree  4096 May 20  2025 unitree_sdk2
+drwxrwxrwx   8 unitree unitree  4096 Feb  2  1970 unitree_sdk2-main
+drwxrwxr-x   2 unitree unitree  4096 Aug 11  2025 .vcpkg
+drwxr-xr-x   2 unitree unitree  4096 Jun  9  2025 Videos
+-rw-------   1 unitree unitree 13885 Feb 10  2026 .viminfo
+-rw-rw-r--   1 unitree unitree   286 Mar  9  2026 .wget-hsts
+-rw-------   1 unitree unitree    52 May 29  2025 .Xauthority
+drwxrwxr-x   7 unitree unitree  4096 Sep  8  2025 xr_teleoperate
+-rw-r--r--   1 unitree unitree  4017 Sep  8  2022 .xsessionrc
+drwxrwxr-x   2 unitree unitree  4096 May 19  2025 Yun_ws
+(base) unitree@ubuntu:~$ find ~ -maxdepth 3 -type d | grep -Ei "sdk2|unitree_sdk"
+/home/unitree/unitree_sdk2
+/home/unitree/unitree_sdk2/thirdparty
+/home/unitree/unitree_sdk2/thirdparty/lib
+/home/unitree/unitree_sdk2/thirdparty/include
+/home/unitree/unitree_sdk2/licenses
+/home/unitree/unitree_sdk2/licenses/eclipse-iceoryx
+/home/unitree/unitree_sdk2/licenses/Tencent
+/home/unitree/unitree_sdk2/licenses/eclipse-cyclonedds
+/home/unitree/unitree_sdk2/.github
+/home/unitree/unitree_sdk2/.github/workflows
+/home/unitree/unitree_sdk2/build
+/home/unitree/unitree_sdk2/build/thirdparty
+/home/unitree/unitree_sdk2/build/CMakeFiles
+/home/unitree/unitree_sdk2/build/bin
+/home/unitree/unitree_sdk2/build/example
+/home/unitree/unitree_sdk2/lib
+/home/unitree/unitree_sdk2/lib/aarch64
+/home/unitree/unitree_sdk2/lib/x86_64
+/home/unitree/unitree_sdk2/.git
+/home/unitree/unitree_sdk2/.git/info
+/home/unitree/unitree_sdk2/.git/logs
+/home/unitree/unitree_sdk2/.git/objects
+/home/unitree/unitree_sdk2/.git/refs
+/home/unitree/unitree_sdk2/.git/branches
+/home/unitree/unitree_sdk2/.git/hooks
+/home/unitree/unitree_sdk2/example
+/home/unitree/unitree_sdk2/example/h1
+/home/unitree/unitree_sdk2/example/state_machine
+/home/unitree/unitree_sdk2/example/b2w
+/home/unitree/unitree_sdk2/example/go2
+/home/unitree/unitree_sdk2/example/helloworld
+/home/unitree/unitree_sdk2/example/go2w
+/home/unitree/unitree_sdk2/example/wireless_controller
+/home/unitree/unitree_sdk2/example/g1
+/home/unitree/unitree_sdk2/example/b2
+/home/unitree/unitree_sdk2/example/jsonize
+/home/unitree/unitree_sdk2/include
+/home/unitree/unitree_sdk2/include/unitree
+/home/unitree/unitree_sdk2/cmake
+/home/unitree/unitree_sdk2-main
+/home/unitree/unitree_sdk2-main/thirdparty
+/home/unitree/unitree_sdk2-main/thirdparty/lib
+/home/unitree/unitree_sdk2-main/thirdparty/include
+/home/unitree/unitree_sdk2-main/licenses
+/home/unitree/unitree_sdk2-main/licenses/eclipse-iceoryx
+/home/unitree/unitree_sdk2-main/licenses/Tencent
+/home/unitree/unitree_sdk2-main/licenses/eclipse-cyclonedds
+/home/unitree/unitree_sdk2-main/build
+/home/unitree/unitree_sdk2-main/build/CMakeFiles
+/home/unitree/unitree_sdk2-main/lib
+/home/unitree/unitree_sdk2-main/lib/aarch64
+/home/unitree/unitree_sdk2-main/lib/x86_64
+/home/unitree/unitree_sdk2-main/example
+/home/unitree/unitree_sdk2-main/example/high_level
+/home/unitree/unitree_sdk2-main/example/state_machine
+/home/unitree/unitree_sdk2-main/example/advanced_gamepad
+/home/unitree/unitree_sdk2-main/example/helloworld
+/home/unitree/unitree_sdk2-main/example/client
+/home/unitree/unitree_sdk2-main/example/humanoid
+/home/unitree/unitree_sdk2-main/example/low_level
+/home/unitree/unitree_sdk2-main/example/jsonize
+/home/unitree/unitree_sdk2-main/example/wireless
+/home/unitree/unitree_sdk2-main/include
+/home/unitree/unitree_sdk2-main/include/unitree
+(base) unitree@ubuntu:~$ find~ -maxdepth 5 -type f -name "*.sh" | grep -Ei "low|level|sdk|mode"
+-bash: find~: command not found
+(base) unitree@ubuntu:~$ find ~ -maxdepth 5 -type f -name "*.sh" | grep -Ei "low|level|sdk|mode"
+/home/unitree/unitree_sdk2-main/install.sh
+(base) unitree@ubuntu:~$ find /home/unitree -type f \( -name "*low*level*.sh" -o -name "*sdk*mode*.sh" -o -name "*sport*.sh" \) 2>/dev/null
+(base) unitree@ubuntu:~$ find /home/unitree -type f -executable 2>/dev/null | grep -E "low_level|sdk_mode|sport_mode"
+/home/unitree/unitree_sdk2/build/bin/h1_low_level_example
+/home/unitree/unitree_sdk2/build/bin/go2_low_level
+/home/unitree/miniforge3/pkgs/libabseil-20250512.1-cxx17_h201e9ed_0/lib/libabsl_low_level_hash.so.2505.0.0
+/home/unitree/miniforge3/envs/g1_slam/lib/libabsl_low_level_hash.so.2505.0.0
+/home/unitree/unitree_sdk2-main/build/h1_low_level_example
+/home/unitree/unitree_sdk2-main/build/low_level
+/home/unitree/unitree_sdk2-main/example/humanoid/low_level/data_buffer.hpp
+/home/unitree/unitree_sdk2-main/example/humanoid/low_level/base_state.h
+/home/unitree/unitree_sdk2-main/example/humanoid/low_level/humanoid.cpp
+/home/unitree/unitree_sdk2-main/example/humanoid/low_level/motors.hpp
+/home/unitree/unitree_sdk2-main/example/humanoid/low_level/humanoid.hpp
+/home/unitree/unitree_sdk2-main/example/low_level/stand_example_b2.cpp
+/home/unitree/unitree_sdk2-main/example/low_level/low_level.cpp
+/home/unitree/unitree_sdk2-main/example/low_level/stand_example_go2.cpp
