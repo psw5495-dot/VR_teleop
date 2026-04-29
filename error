@@ -3,3 +3,11 @@ find /home/unitree -type f \( -name "*low*level*.sh" -o -name "*sdk*mode*.sh" -o
 
 # 실행 가능한 바이너리 검색
 find /home/unitree -type f -executable 2>/dev/null | grep -E "low_level|sdk_mode|sport_mode"
+
+
+# 예시: 발견된 스크립트 실행 (실제 경로로 교체)
+chmod +x /home/unitree/unitree_sdk2/scripts/stop_sport_mode.sh
+./stop_sport_mode.sh
+
+# 또는
+bash /home/unitree/unitree_sdk2/bin/enable_low_level_mode.sh
