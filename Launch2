@@ -28,7 +28,7 @@ ros2 topic echo /g1/target_pose
 
 
 
-ssh unitree@[G1_IP]
+ssh unitree@192.168.123.26
 # G1에서 실행
 sudo systemctl stop unitree_robot_state_publisher
 ~/unitree_sdk2/script/enable_low_level_mode.sh
