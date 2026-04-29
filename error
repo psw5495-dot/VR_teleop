@@ -1,2 +1,5 @@
-(base) unitree@ubuntu:~$ ~/unitree_sdk2/script/enable_low_level_mode.sh
--bash: /home/unitree/unitree_sdk2/script/enable_low_level_mode.sh: No such file or directory
+# 구체적인 스크립트 검색
+find /home/unitree -type f \( -name "*low*level*.sh" -o -name "*sdk*mode*.sh" -o -name "*sport*.sh" \) 2>/dev/null
+
+# 실행 가능한 바이너리 검색
+find /home/unitree -type f -executable 2>/dev/null | grep -E "low_level|sdk_mode|sport_mode"
