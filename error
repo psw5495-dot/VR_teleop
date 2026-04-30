@@ -1,50 +1,10 @@
-(tv_env) (base) lgit@lgit-17Z90R-EP7NL:~/TeleVision$ source /opt/ros/humble/setup.bash
-cd ~/TeleVision
-# ⭐️ 성공했던 유선 인터페이스 이름 사용
-python3 g1_bridge_node.py enx80691ad9f138
-✅ CRC 모듈 로드 성공
-======================================================================
-🤖 Meta Quest3 → G1 Teleoperation 브릿지 시작
-⚠️  주의: 로봇 주변에 장애물이 없는지 확인하세요!
-======================================================================
-🌐 지정된 네트워크 인터페이스: enx80691ad9f138
-[INFO] [1777532619.664808454] [g1_teleop_bridge]: 🤖 G1 Teleop Bridge 초기화 완료
-[INFO] [1777532619.665042302] [g1_teleop_bridge]: ⚠️  로봇 주변 안전 확인 후 시작하세요!
-[INFO] [1777532619.665204093] [g1_teleop_bridge]: 🔍 G1 모션 제어 권한 획득 중...
-[INFO] [1777532620.406959687] [g1_teleop_bridge]:    ✅ 이미 Low-level 모드
-[INFO] [1777532620.626158388] [g1_teleop_bridge]: ✅ DDS 채널 초기화 완료
-[INFO] [1777532620.632563318] [g1_teleop_bridge]: ⏳ G1 로봇 상태 수신 대기 중...
-[INFO] [1777532620.633482811] [g1_teleop_bridge]: ✅ mode_machine: 6
-[INFO] [1777532620.634306426] [g1_teleop_bridge]: 🚀 500Hz 제어 루프 시작!
-
-⌨️  키보드 제어:
-   s + Enter: 비상 정지
-   r + Enter: 제어 재개
-   + + Enter: 속도 증가 (x1.5)
-   - + Enter: 속도 감소 (÷1.5)
-   현재 MAX_DELTA: 0.00050 rad/tick
-
-[INFO] [1777532623.689476600] [g1_teleop_bridge]: 🎮 VR 텔레오퍼레이션 모드 활성화!
-[INFO] [1777532623.689792072] [g1_teleop_bridge]:    Quest3 컨트롤러를 천천히 움직여보세요
-[INFO] [1777532625.702672544] [g1_teleop_bridge]: ✅ DDS 전송 2500회 | CRC: 0xBF32159C
-[INFO] [1777532630.547038549] [g1_teleop_bridge]: 📡 ROS 수신: 6개 관절
-[INFO] [1777532630.549581063] [g1_teleop_bridge]:    🎯 각도 변화: {'shoulder_pitch': '0.0691→0.0000 (Δ0.0691)', 'shoulder_roll': '0.0095→0.0000 (Δ0.0095)', 'shoulder_yaw': '0.0022→0.0000 (Δ0.0022)', 'wrist_roll': '0.0019→0.0000 (Δ0.0019)', 'wrist_pitch': '0.0062→0.0000 (Δ0.0062)'}
-[INFO] [1777532630.551664509] [g1_teleop_bridge]:    📊 상태: teleop=True | time=9.8s | MAX_DELTA=0.00050
-[INFO] [1777532630.752173431] [g1_teleop_bridge]: ✅ DDS 전송 5000회 | CRC: 0xC4238781
-[INFO] [1777532631.879971904] [g1_teleop_bridge]: 📡 ROS 수신: 6개 관절
-[WARN] [1777532631.881455178] [g1_teleop_bridge]:    ❌ 각도 변화 없음! → IK 노드 또는 VR 데이터 확인
-[INFO] [1777532631.881626108] [g1_teleop_bridge]:    📊 상태: teleop=True | time=11.1s | MAX_DELTA=0.00050
-[INFO] [1777532632.901191625] [g1_teleop_bridge]: 📡 ROS 수신: 6개 관절
-[WARN] [1777532632.912812328] [g1_teleop_bridge]:    ❌ 각도 변화 없음! → IK 노드 또는 VR 데이터 확인
-[INFO] [1777532632.925131620] [g1_teleop_bridge]:    📊 상태: teleop=True | time=12.1s | MAX_DELTA=0.00050
-[INFO] [1777532633.899360583] [g1_teleop_bridge]: 📡 ROS 수신: 6개 관절
-[WARN] [1777532633.899624004] [g1_teleop_bridge]:    ❌ 각도 변화 없음! → IK 노드 또는 VR 데이터 확인
-[INFO] [1777532633.901206663] [g1_teleop_bridge]:    📊 상태: teleop=True | time=13.0s | MAX_DELTA=0.00050
-[INFO] [1777532634.909988668] [g1_teleop_bridge]: 📡 ROS 수신: 6개 관절
-[WARN] [1777532634.911258342] [g1_teleop_bridge]:    ❌ 각도 변화 없음! → IK 노드 또는 VR 데이터 확인
-[INFO] [1777532634.912015729] [g1_teleop_bridge]:    📊 상태: teleop=True | time=14.0s | MAX_DELTA=0.00050
-[INFO] [1777532635.964706888] [g1_teleop_bridge]: 📡 ROS 수신: 6개 관절
-[WARN] [1777532635.966083126] [g1_teleop_bridge]:    ❌ 각도 변화 없음! → IK 노드 또는 VR 데이터 확인
-[INFO] [1777532635.970622905] [g1_teleop_bridge]: ✅ DDS 전송 7500회 | CRC: 0x0F9A7A4E
-[INFO] [1777532635.981905634] [g1_teleop_bridge]:    📊 상태: teleop=True | time=15.0s | MAX_DELTA=0.00050
-[INFO] [1777532636.993732077] [g1_teleop_bridge]: 📡 ROS 수신: 6개 관절
+@dataclass
+class TeleopConfig:
+    pos_scale: float = 0.3                              # 0.5→0.3 (더 작은 움직임)
+    robot_home_pos: Tuple[float, float, float] = (0.35, -0.20, 0.45)
+    max_dx: float = 0.08                                # 0.10→0.08
+    max_dy: float = 0.08
+    max_dz: float = 0.08
+    ema_alpha: float = 0.15
+    watchdog_timeout_s: float = 2.0                     # ⭐️ 0.3→2.0 (워치독 완화)
+    axis_sign: Tuple[float, float, float] = (1.0, -1.0, -1.0)
