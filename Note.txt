@@ -1,21 +1,261 @@
-# 터미널 1: VR 위치 데이터 확인
-source /opt/ros/humble/setup.bash
-ros2 topic echo /g1/target_pose
+#!/usr/bin/env python3
+# ~/TeleVision/g1_ik_node.py
+"""
+G1 역기구학 노드 (안전 구역 자동 보정 기능)
+핵심: 범위 초과 시 차단하지 않고 안전 구역으로 클리핑하여 지속 제어
+"""
 
-# 터미널 2: IK 계산 결과 확인
-ros2 topic echo /g1/arm/joint_commands
+import rclpy
+from rclpy.node import Node
+from geometry_msgs.msg import PoseStamped
+from sensor_msgs.msg import JointState
+import numpy as np
+import pinocchio as pin
+import os
+import time
+import threading
+import xml.etree.ElementTree as ET
 
-# 터미널 3: G1 실제 관절 상태 확인
-python3 -c "
-import sys, time
-from unitree_sdk2py.core.channel import *
-from unitree_sdk2py.idl.unitree_hg.msg.dds_ import *
 
-def cb(msg):
-    print(f'오른팔 실제 각도: {[f\"{msg.motor_state[i].q:.3f}\" for i in [22,23,24,25,26,27,28]]}')
+class G1IKNode(Node):
+    def __init__(self):
+        super().__init__('g1_ik_node')
+        
+        self.setup_pinocchio_model()
+        
+        self.target_sub = self.create_subscription(
+            PoseStamped, '/g1/target_pose', self.target_callback, 10)
+        self.joint_pub = self.create_publisher(
+            JointState, '/g1/arm/joint_commands', 10)
+        self.joint_state_sub = self.create_subscription(
+            JointState, '/joint_states', self.joint_state_callback, 10)
+        
+        self.current_q = None
+        self.emergency_stop = False
+        self.robot_connected = False
+        self.last_log_time = time.time()
+        self.prev_q = None
+        
+        # ⭐️ 작업공간 대폭 확장 (Quest3 VR 환경에 맞춤)
+        self.workspace_limits = {
+            'x_min': -0.3, 'x_max': 1.5,   # 뒤로 당기기 + 앞으로 뻗기
+            'y_min': -1.2, 'y_max': 1.2,   # 좌우 넓은 움직임
+            'z_min': -0.5, 'z_max': 2.0    # 위아래 자유로운 움직임
+        }
+        
+        threading.Thread(target=self.keyboard_monitor, daemon=True).start()
+        
+        self.get_logger().info('🤖 G1 IK 노드 시작!')
+        self.get_logger().info('⭐ 자동 보정 모드: 범위 초과 시 차단하지 않고 클리핑')
+        self.get_logger().info('📡 /g1/target_pose 구독 중...')
 
-ChannelFactoryInitialize(0, 'enx80691ad9f138')
-sub = ChannelSubscriber('rt/lowstate', LowState_)
-sub.Init(cb, 10)
-while True: time.sleep(1)
-" 2>/dev/null
+    def setup_pinocchio_model(self):
+        """Pinocchio 모델 설정"""
+        base_dir = os.path.dirname(os.path.abspath(__file__))
+        
+        urdf_candidates = [
+            os.path.join(base_dir, 'models', 'g1', 'g1_body29_hand14.urdf'),
+            os.path.join(base_dir, 'models', 'g1', 'g1_body23.urdf'),
+        ]
+        
+        urdf_path = None
+        for path in urdf_candidates:
+            if os.path.exists(path):
+                urdf_path = path
+                break
+        
+        if not urdf_path:
+            self.get_logger().error('❌ G1 URDF 파일을 찾을 수 없습니다!')
+            self.get_logger().error('G1에서 URDF 복사: scp -r unitree@[G1_IP]:'
+                                  '/home/unitree/xr_teleoperate/assets/g1 ./models/')
+            exit(1)
+        
+        try:
+            self.model = pin.buildModelFromUrdf(urdf_path)
+            self.data = self.model.createData()
+            self.current_q = pin.neutral(self.model)
+            
+            self.get_logger().info(f'✅ G1 URDF 로드: {os.path.basename(urdf_path)}')
+            self.get_logger().info(f'   총 관절 수: {self.model.nq}')
+        except Exception as e:
+            self.get_logger().error(f'❌ URDF 파싱 실패: {e}')
+            exit(1)
+        
+        # 오른팔 관절 정의
+        self.right_arm_joints = [
+            'right_shoulder_pitch_joint', 'right_shoulder_roll_joint',
+            'right_shoulder_yaw_joint',   'right_elbow_pitch_joint',
+            'right_wrist_roll_joint',     'right_wrist_pitch_joint',
+            'right_wrist_yaw_joint'
+        ]
+        
+        # End-effector 프레임 찾기
+        ee_candidates = [
+            'right_wrist_yaw_link', 'right_wrist_pitch_link',
+            'right_wrist_roll_link', 'right_hand_base_link'
+        ]
+        
+        self.ee_frame_id = None
+        for name in ee_candidates:
+            if self.model.existFrame(name):
+                self.ee_frame_id = self.model.getFrameId(name)
+                self.get_logger().info(f'✅ End-effector 프레임: {name}')
+                break
+        
+        if self.ee_frame_id is None:
+            self.ee_frame_id = self.model.nframes - 1
+            self.get_logger().warn(f'⚠️ 기본 프레임 사용: {self.model.frames[self.ee_frame_id].name}')
+
+    def keyboard_monitor(self):
+        """키보드 비상 정지 모니터링"""
+        try:
+            while rclpy.ok():
+                key = input().strip().lower()
+                if key in ['s', 'stop']:
+                    self.emergency_stop = True
+                    self.get_logger().warn('🛑 비상 정지 활성화!')
+                elif key in ['r', 'start']:
+                    self.emergency_stop = False
+                    self.get_logger().info('▶️ 텔레오퍼레이션 재개')
+        except:
+            pass
+
+    def joint_state_callback(self, msg):
+        """G1 현재 관절 상태 업데이트"""
+        if not self.robot_connected:
+            self.robot_connected = True
+            self.get_logger().info('✅ G1 로봇 연결됨!')
+
+    def clip_to_workspace(self, target_pos):
+        """⭐️ 핵심: 범위 초과 시 차단하지 않고 안전 구역으로 자동 보정"""
+        x, y, z = target_pos
+        lim = self.workspace_limits
+        
+        # 각 축별로 안전 범위 내로 클리핑
+        clipped_x = np.clip(x, lim['x_min'], lim['x_max'])
+        clipped_y = np.clip(y, lim['y_min'], lim['y_max'])
+        clipped_z = np.clip(z, lim['z_min'], lim['z_max'])
+        
+        clipped_pos = np.array([clipped_x, clipped_y, clipped_z])
+        was_clipped = not np.allclose(target_pos, clipped_pos, atol=1e-6)
+        
+        return clipped_pos, was_clipped
+
+    def solve_ik(self, target_pos):
+        """Pinocchio 기반 IK 계산"""
+        q = self.current_q.copy()
+        eps = 1e-3
+        max_iter = 50
+        dt = 0.1
+        damping = 1e-4
+        
+        for iteration in range(max_iter):
+            pin.forwardKinematics(self.model, self.data, q)
+            pin.updateFramePlacements(self.model, self.data)
+            
+            current_pos = self.data.oMf[self.ee_frame_id].translation
+            error = target_pos - current_pos
+            
+            if np.linalg.norm(error) < eps:
+                return q, True
+            
+            J_full = pin.computeFrameJacobian(
+                self.model, self.data, q, self.ee_frame_id,
+                pin.ReferenceFrame.LOCAL_WORLD_ALIGNED
+            )
+            J_pos = J_full[:3, :]
+            
+            JJT = J_pos @ J_pos.T
+            dq = J_pos.T @ np.linalg.solve(JJT + damping * np.eye(3), error)
+            
+            q = q + dt * dq
+            q = np.clip(q, self.model.lowerPositionLimit, 
+                       self.model.upperPositionLimit)
+        
+        return q, False
+
+    def target_callback(self, msg):
+        """⭐️ VR 목표 좌표를 관절 각도로 변환 (보정 기능 포함)"""
+        if self.emergency_stop:
+            return
+        
+        try:
+            # 원래 VR 목표 좌표
+            raw_target = np.array([
+                msg.pose.position.x,
+                msg.pose.position.y,
+                msg.pose.position.z
+            ])
+            
+            # ⭐️ 핵심: 범위 초과 시 차단하지 않고 안전 구역으로 자동 보정
+            safe_target, was_clipped = self.clip_to_workspace(raw_target)
+            
+            # IK 계산
+            q_target, converged = self.solve_ik(safe_target)
+            
+            if q_target is not None:
+                # 급격한 각도 변화 방지 (최대 0.15 라디안/스텝)
+                max_angle_change = 0.15
+                if self.prev_q is not None:
+                    angle_diff = np.abs(q_target - self.prev_q)
+                    max_change = np.max(angle_diff)
+                    if max_change > max_angle_change:
+                        # 선형 보간으로 부드러운 움직임 생성
+                        alpha = max_angle_change / max_change
+                        q_target = self.prev_q + alpha * (q_target - self.prev_q)
+                
+                self.publish_joint_command(q_target)
+                self.current_q = q_target
+                self.prev_q = q_target.copy()
+                
+                # 상태 로그 (1초마다)
+                now = time.time()
+                if now - self.last_log_time > 1.0:
+                    status = "수렴됨" if converged else "근사해"
+                    clip_msg = " (좌표 보정됨)" if was_clipped else ""
+                    
+                    self.get_logger().info(
+                        f'✅ IK {status}{clip_msg} → 관절 명령 전송 | '
+                        f'목표: ({safe_target[0]:.3f}, {safe_target[1]:.3f}, {safe_target[2]:.3f})'
+                    )
+                    
+                    if was_clipped:
+                        self.get_logger().info(
+                            f'   원래: ({raw_target[0]:.3f}, {raw_target[1]:.3f}, {raw_target[2]:.3f}) '
+                            f'→ 보정: ({safe_target[0]:.3f}, {safe_target[1]:.3f}, {safe_target[2]:.3f})'
+                        )
+                    
+                    self.last_log_time = now
+                
+        except Exception as e:
+            self.get_logger().error(f'목표 좌표 처리 에러: {e}')
+
+    def publish_joint_command(self, q):
+        """관절 명령 발행"""
+        if not self.right_arm_joints:
+            return
+        
+        msg = JointState()
+        msg.header.stamp = self.get_clock().now().to_msg()
+        msg.name = self.right_arm_joints
+        n = len(self.right_arm_joints)
+        msg.position = q[:n].tolist()
+        msg.velocity = [0.0] * n
+        
+        self.joint_pub.publish(msg)
+
+
+def main():
+    rclpy.init()
+    node = G1IKNode()
+    try:
+        rclpy.spin(node)
+    except KeyboardInterrupt:
+        node.get_logger().info('🛑 G1 IK 노드 종료')
+    finally:
+        node.destroy_node()
+        rclpy.shutdown()
+
+
+if __name__ == '__main__':
+    main()
