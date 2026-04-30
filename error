@@ -1,12 +1,17 @@
-# 현재 네트워크 인터페이스 확인
-ip addr show | grep -E "wlp|enx|eth" | grep "UP"
-
-# WiFi 사용 시
-python3 unitree_sdk2_ex.py wlp0s20f3
-
-# 유선 사용 시 (USB-이더넷 어댑터)
-python3 unitree_sdk2_ex.py enx80691ad9f138
-
-# 환경변수도 설정 (WiFi 사용 시 필수)
-export CYCLONEDX_URI=file:///home/lgit/cyclonedx_g1.xml
-python3 unitree_sdk2_ex.py wlp0s20f3
+(tv_env) (base) lgit@lgit-17Z90R-EP7NL:~/TeleVision$ source /opt/ros/humble/setup.bash
+cd ~/TeleVision
+# ⭐️ 성공했던 유선 인터페이스 이름 사용
+python3 g1_bridge_node.py enx80691ad9f138
+======================================================================
+🤖 Meta Quest3 → G1 Teleoperation 브릿지 시작
+⚠️  주의: 로봇 주변에 장애물이 없는지 확인하세요!
+======================================================================
+🌐 지정된 네트워크 인터페이스: enx80691ad9f138
+Traceback (most recent call last):
+  File "/home/lgit/TeleVision/g1_bridge_node.py", line 404, in <module>
+    main()
+  File "/home/lgit/TeleVision/g1_bridge_node.py", line 387, in main
+    bridge_node = G1TeleopBridge()
+  File "/home/lgit/TeleVision/g1_bridge_node.py", line 106, in __init__
+    self.low_cmd = LowCmd_()
+TypeError: LowCmd_.__init__() missing 5 required positional arguments: 'mode_pr', 'mode_machine', 'motor_cmd', 'reserve', and 'crc'
