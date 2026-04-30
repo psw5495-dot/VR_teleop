@@ -1,34 +1,264 @@
-def _smooth_teleop(self):
-    """
-    개선된 버전: 오른팔(22~28번)만 제어, 나머지 완전 비간섭
-    """
-    self.low_cmd.mode_pr = Mode.PR
-    self.low_cmd.mode_machine = self.mode_machine_
+#!/usr/bin/env python3
+# ~/TeleVision/g1_bridge_node.py
+"""
+Meta Quest3 → G1 Teleoperation 브릿지 (공식 예제 기반)
+핵심: 전체 관절 안전 제어 + 오른팔만 VR 추종
+"""
 
-    # ⭐️ 핵심 변경: 관절별 차별화된 제어
-    for i in range(G1_NUM_MOTOR):
-        if i in RIGHT_ARM_INDICES:
-            # 오른팔: VR 명령에 따른 증분 제어
-            target = self.target_q[i]
-            current = self.current_smooth_q[i]
-            diff = target - current
+import time
+import sys
+import numpy as np
+import threading
+import rclpy
+from rclpy.node import Node
+from sensor_msgs.msg import JointState
+
+# ⭐️ 공식 예제와 100% 동일한 임포트
+from unitree_sdk2py.core.channel import (
+    ChannelPublisher, ChannelSubscriber, ChannelFactoryInitialize
+)
+from unitree_sdk2py.idl.default import unitree_hg_msg_dds__LowCmd_
+from unitree_sdk2py.idl.default import unitree_hg_msg_dds__LowState_
+from unitree_sdk2py.idl.unitree_hg.msg.dds_ import LowCmd_, LowState_
+from unitree_sdk2py.utils.crc import CRC
+from unitree_sdk2py.utils.thread import RecurrentThread
+from unitree_sdk2py.comm.motion_switcher.motion_switcher_client import MotionSwitcherClient
+
+# ── G1 로봇 사양 (공식 예제와 동일) ──────────────────────────
+G1_NUM_MOTOR = 29
+
+Kp = [
+    60, 60, 60, 100, 40, 40,      # left leg
+    60, 60, 60, 100, 40, 40,      # right leg
+    60, 40, 40,                   # waist
+    40, 40, 40, 40, 40, 40, 40,   # left arm
+    40, 40, 40, 40, 40, 40, 40    # right arm
+]
+
+Kd = [
+    1, 1, 1, 2, 1, 1,     # left leg
+    1, 1, 1, 2, 1, 1,     # right leg
+    1, 1, 1,              # waist
+    1, 1, 1, 1, 1, 1, 1,  # left arm
+    1, 1, 1, 1, 1, 1, 1   # right arm
+]
+
+class Mode:
+    PR = 0
+
+# 오른팔 관절 인덱스 (22~28번)
+RIGHT_ARM_INDICES = [22, 23, 24, 25, 26, 27, 28]
+
+ROS_TO_G1_INDEX = {
+    'right_shoulder_pitch_joint': 22,
+    'right_shoulder_roll_joint' : 23,
+    'right_shoulder_yaw_joint'  : 24,
+    'right_elbow_pitch_joint'   : 25,
+    'right_wrist_roll_joint'    : 26,
+    'right_wrist_pitch_joint'   : 27,
+    'right_wrist_yaw_joint'     : 28,
+}
+
+
+class G1TeleopBridge(Node):
+    def __init__(self):
+        super().__init__('g1_teleop_bridge')
+        
+        # ⭐️ 공식 예제와 동일한 제어 변수
+        self.time_ = 0.0
+        self.control_dt_ = 0.002  # 500Hz
+        self.duration_ = 3.0      # 워밍업 시간
+        
+        self.mode_pr_ = Mode.PR
+        self.mode_machine_ = 0
+        self.update_mode_machine_ = False
+        
+        # ⭐️ 핵심: 공식 예제와 동일한 객체 생성 방식
+        self.low_cmd = unitree_hg_msg_dds__LowCmd_()
+        self.low_state = None
+        self.crc = CRC()
+        
+        # 텔레오퍼레이션 상태
+        self.initial_q = [0.0] * G1_NUM_MOTOR    # 시작 시 로봇 자세
+        self.target_q = [0.0] * G1_NUM_MOTOR     # VR 목표 각도
+        self.current_smooth_q = [0.0] * G1_NUM_MOTOR  # 부드러운 이동
+        
+        # 증분 제어 파라미터
+        self.MAX_DELTA = 0.001  # 부드러운 움직임
+        self.teleop_active = False
+        
+        # ROS2 구독
+        self.subscription = self.create_subscription(
+            JointState, '/g1/arm/joint_commands', 
+            self.ros_joint_callback, 10
+        )
+        
+        self.get_logger().info("🤖 G1 Teleop Bridge 초기화 완료")
+
+    def Init(self):
+        """⭐️ 공식 예제와 동일한 초기화"""
+        self.msc = MotionSwitcherClient()
+        self.msc.SetTimeout(5.0)
+        self.msc.Init()
+
+        # 공식 예제와 동일한 모드 해제 방식
+        status, result = self.msc.CheckMode()
+        while result and result.get('name', ''):
+            self.get_logger().info(f"모션 '{result['name']}' 해제 중...")
+            self.msc.ReleaseMode()
+            status, result = self.msc.CheckMode()
+            time.sleep(1)
+
+        # 공식 예제와 동일한 채널 생성
+        self.lowcmd_publisher_ = ChannelPublisher("rt/lowcmd", LowCmd_)
+        self.lowcmd_publisher_.Init()
+
+        self.lowstate_subscriber = ChannelSubscriber("rt/lowstate", LowState_)
+        self.lowstate_subscriber.Init(self.LowStateHandler, 10)
+        
+        self.get_logger().info("✅ DDS 채널 초기화 완료")
+
+    def Start(self):
+        """⭐️ 공식 예제와 동일한 시작 구조"""
+        self.lowCmdWriteThreadPtr = RecurrentThread(
+            interval=self.control_dt_,
+            target=self.LowCmdWrite,
+            name="control"
+        )
+        
+        # 공식 예제와 동일한 대기 방식
+        while not self.update_mode_machine_:
+            time.sleep(1)
+
+        self.get_logger().info("🚀 500Hz 제어 루프 시작!")
+        threading.Thread(target=self.keyboard_monitor, daemon=True).start()
+        self.lowCmdWriteThreadPtr.Start()
+
+    def LowStateHandler(self, msg: LowState_):
+        """⭐️ 공식 예제와 동일한 상태 핸들러"""
+        self.low_state = msg
+
+        if not self.update_mode_machine_:
+            self.mode_machine_ = self.low_state.mode_machine
             
-            if abs(diff) > self.MAX_DELTA:
-                self.current_smooth_q[i] = current + np.sign(diff) * self.MAX_DELTA
-            else:
-                self.current_smooth_q[i] = target
+            # 현재 로봇 자세를 기준으로 초기화
+            for i in range(G1_NUM_MOTOR):
+                q = self.low_state.motor_state[i].q
+                self.initial_q[i] = q
+                self.target_q[i] = q
+                self.current_smooth_q[i] = q
+            
+            self.update_mode_machine_ = True
+            self.get_logger().info("✅ 현재 자세로 초기화 완료")
 
-            self.low_cmd.motor_cmd[i].mode = 1    # 위치 제어 활성화
-            self.low_cmd.motor_cmd[i].q = self.current_smooth_q[i]
-            self.low_cmd.motor_cmd[i].dq = 0.0
-            self.low_cmd.motor_cmd[i].tau = 0.0
-            self.low_cmd.motor_cmd[i].kp = Kp[i] * self.SOFT_KP_RATIO
-            self.low_cmd.motor_cmd[i].kd = Kd[i] * self.SOFT_KD_RATIO
+    def ros_joint_callback(self, msg):
+        """VR에서 오른팔 목표 각도 수신"""
+        if not self.update_mode_machine_:
+            return
+            
+        # 오른팔 관절의 target_q만 VR 값으로 업데이트
+        for joint_name, g1_idx in ROS_TO_G1_INDEX.items():
+            if joint_name in msg.name:
+                idx = msg.name.index(joint_name)
+                new_angle = float(msg.position[idx])
+                
+                if abs(new_angle) <= np.pi:  # 안전 범위 확인
+                    self.target_q[g1_idx] = new_angle
+
+    def LowCmdWrite(self):
+        """⭐️ 핵심: 공식 예제 구조 + 텔레오퍼레이션"""
+        self.time_ += self.control_dt_
+
+        self.low_cmd.mode_pr = Mode.PR
+        self.low_cmd.mode_machine = self.mode_machine_
+
+        if self.time_ < self.duration_:
+            # Stage 1: 워밍업 (공식 예제와 동일)
+            ratio = np.clip(self.time_ / self.duration_, 0.0, 1.0)
+            
+            for i in range(G1_NUM_MOTOR):
+                # ⭐️ 모든 관절 활성화 (안전을 위해 필수)
+                self.low_cmd.motor_cmd[i].mode = 1
+                self.low_cmd.motor_cmd[i].tau = 0.0
+                self.low_cmd.motor_cmd[i].dq = 0.0
+                self.low_cmd.motor_cmd[i].kp = Kp[i]
+                self.low_cmd.motor_cmd[i].kd = Kd[i]
+                
+                # 현재 위치에서 시작 자세로 부드럽게 이동
+                current_pos = self.low_state.motor_state[i].q
+                target_pos = self.initial_q[i]
+                self.low_cmd.motor_cmd[i].q = (1.0 - ratio) * current_pos + ratio * target_pos
         else:
-            # 나머지 관절: G1 내부 제어기에 완전 위임
-            self.low_cmd.motor_cmd[i].mode = 0    # 비활성화
-            self.low_cmd.motor_cmd[i].q = 0.0
-            self.low_cmd.motor_cmd[i].dq = 0.0
-            self.low_cmd.motor_cmd[i].tau = 0.0
-            self.low_cmd.motor_cmd[i].kp = 0.0    # 외부 간섭 차단
-            self.low_cmd.motor_cmd[i].kd = 0.0    # 외부 간섭 차단
+            # Stage 2: VR 텔레오퍼레이션
+            if not self.teleop_active:
+                self.teleop_active = True
+                self.get_logger().info("🎮 VR 텔레오퍼레이션 시작!")
+
+            for i in range(G1_NUM_MOTOR):
+                # ⭐️ 모든 관절 활성화 유지 (안전 메커니즘)
+                self.low_cmd.motor_cmd[i].mode = 1
+                self.low_cmd.motor_cmd[i].dq = 0.0
+                self.low_cmd.motor_cmd[i].tau = 0.0
+                self.low_cmd.motor_cmd[i].kp = Kp[i]
+                self.low_cmd.motor_cmd[i].kd = Kd[i]
+
+                if i in RIGHT_ARM_INDICES:
+                    # 오른팔: VR 목표를 향해 부드럽게 이동
+                    target = self.target_q[i]
+                    current = self.current_smooth_q[i]
+                    diff = target - current
+                    
+                    if abs(diff) > self.MAX_DELTA:
+                        self.current_smooth_q[i] = current + np.sign(diff) * self.MAX_DELTA
+                    else:
+                        self.current_smooth_q[i] = target
+                        
+                    self.low_cmd.motor_cmd[i].q = self.current_smooth_q[i]
+                else:
+                    # 나머지: 시작 자세 유지
+                    self.low_cmd.motor_cmd[i].q = self.initial_q[i]
+
+        # ⭐️ 공식 예제와 동일한 CRC 계산 및 전송
+        self.low_cmd.crc = self.crc.Crc(self.low_cmd)
+        self.lowcmd_publisher_.Write(self.low_cmd)
+
+    def keyboard_monitor(self):
+        """키보드 속도 조절"""
+        print("\n⌨️  [+] 속도증가 | [-] 속도감소\n")
+        try:
+            while True:
+                key = input().strip().lower()
+                if key == '+':
+                    self.MAX_DELTA = min(self.MAX_DELTA * 1.5, 0.01)
+                    self.get_logger().info(f'⚡ 속도: {self.MAX_DELTA:.5f}')
+                elif key == '-':
+                    self.MAX_DELTA = max(self.MAX_DELTA / 1.5, 0.0001)
+                    self.get_logger().info(f'🐢 속도: {self.MAX_DELTA:.5f}')
+        except (EOFError, KeyboardInterrupt):
+            pass
+
+
+def main():
+    print("🤖 G1 VR Teleoperation (공식 예제 기반)")
+    
+    if len(sys.argv) > 1:
+        ChannelFactoryInitialize(0, sys.argv[1])
+    else:
+        ChannelFactoryInitialize(0)
+
+    rclpy.init()
+    node = G1TeleopBridge()
+    
+    try:
+        node.Init()
+        node.Start()
+        rclpy.spin(node)
+    except KeyboardInterrupt:
+        print("\n🛑 종료 중...")
+    finally:
+        node.destroy_node()
+        rclpy.shutdown()
+
+
+if __name__ == '__main__':
+    main()
