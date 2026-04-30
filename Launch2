@@ -32,36 +32,17 @@ python3 unitree_sdk2_ex.py enx80691ad9f138
 
 
 
-ssh unitree@192.168.123.26
-# G1에서 실행
-sudo systemctl stop unitree_robot_state_publisher
-~/unitree_sdk2/script/enable_low_level_mode.sh
+cd ~/TeleVision
+python3 serve_webxr.py
 
 
-
-# low_level 실행파일 확인
-ls -la ~/unitree_sdk2-main/build/low_level
-
-# 네트워크 인터페이스 확인
-ip addr show | grep "inet " | grep -v 127
-
-# low_level 프로그램 실행 (백그라운드)
-cd ~/unitree_sdk2-main/build/
-nohup ./low_level &
-
-# 또는 특정 네트워크 인터페이스 지정
-# ./low_level eth0
+source /opt/ros/humble/setup.bash
+cd ~/TeleVision
+python3 g1_ik_node.py
 
 
-
-# G1에서 확인
-echo "=== 현재 프로세스 상태 ==="
-ps aux | grep -E "sport|motion|low_level" | grep -v grep
-
-echo "=== 활성 서비스 ==="
-systemctl list-units --state=active | grep -E "unitree|sport"
-
-# 성공 시: sport 관련 프로세스가 없거나 low_level 프로세스가 실행 중
-
-
+source /opt/ros/humble/setup.bash
+cd ~/TeleVision
+# ⭐️ 성공했던 유선 인터페이스 이름 사용
+python3 g1_bridge_node.py enx80691ad9f138
 
