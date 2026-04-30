@@ -1,5 +1,44 @@
-source /opt/ros/humble/setup.bash
-ros2 topic echo /g1/target_pose
-
-
-ros2 topic echo /g1/arm/joint_commands
+def ros_joint_callback(self, msg):
+    """ROS2에서 VR IK 목표 각도 수신 - 디버그 강화 버전"""
+    if not self.initial_posture_captured or self.emergency_stop:
+        return
+        
+    matched_joints = 0
+    angle_changes = {}
+    
+    for joint_name, g1_idx in ROS_TO_G1_INDEX.items():
+        if joint_name in msg.name:
+            idx_in_msg = msg.name.index(joint_name)
+            new_angle = float(msg.position[idx_in_msg])
+            old_angle = self.target_q[g1_idx]
+            
+            if abs(new_angle) > np.pi:
+                self.get_logger().warn(f"⚠️ {joint_name}: {new_angle:.3f}rad 범위 초과")
+                continue
+            
+            # 변화량 기록
+            diff = abs(new_angle - old_angle)
+            if diff > 0.001:  # 0.001 라디안 이상 변화만 기록
+                angle_changes[joint_name.replace('right_', '').replace('_joint', '')] = (
+                    f"{old_angle:.4f}→{new_angle:.4f} (Δ{diff:.4f})"
+                )
+            
+            self.target_q[g1_idx] = new_angle
+            matched_joints += 1
+    
+    # 실시간 상태 출력
+    now = time.time()
+    if now - self.last_log > 1.0:  # 1초마다
+        self.get_logger().info(f"📡 ROS 수신: {matched_joints}개 관절")
+        
+        if angle_changes:
+            self.get_logger().info(f"   🎯 각도 변화: {angle_changes}")
+        else:
+            self.get_logger().warn("   ❌ 각도 변화 없음! → IK 노드 또는 VR 데이터 확인")
+            
+        # 현재 제어 상태도 함께 출력
+        self.get_logger().info(
+            f"   📊 상태: teleop={self.teleop_active} | "
+            f"time={self.time_:.1f}s | MAX_DELTA={self.MAX_DELTA:.5f}"
+        )
+        self.last_log = now
