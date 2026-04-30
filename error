@@ -1,10 +1,12 @@
-(tv_env) (base) lgit@lgit-17Z90R-EP7NL:~/TeleVision$ python3 unitree_sdk2_ex.py
-WARNING: Please ensure there are no obstacles around the robot while running this example.
-Press Enter to continue...
-[ClientStub] send request error. id: 68439280722754
-Traceback (most recent call last):
-  File "/home/lgit/TeleVision/unitree_sdk2_ex.py", line 201, in <module>
-    custom.Init()
-  File "/home/lgit/TeleVision/unitree_sdk2_ex.py", line 95, in Init
-    while result['name']:
-TypeError: 'NoneType' object is not subscriptable
+# 현재 네트워크 인터페이스 확인
+ip addr show | grep -E "wlp|enx|eth" | grep "UP"
+
+# WiFi 사용 시
+python3 unitree_sdk2_ex.py wlp0s20f3
+
+# 유선 사용 시 (USB-이더넷 어댑터)
+python3 unitree_sdk2_ex.py enx80691ad9f138
+
+# 환경변수도 설정 (WiFi 사용 시 필수)
+export CYCLONEDX_URI=file:///home/lgit/cyclonedx_g1.xml
+python3 unitree_sdk2_ex.py wlp0s20f3
