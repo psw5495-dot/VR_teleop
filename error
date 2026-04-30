@@ -21,3 +21,7 @@ def create_empty_low_cmd():
         reserve=[0, 0, 0, 0],   # uint32[4]: 예약 필드
         crc=0                   # uint32: CRC 체크섬
     )
+
+# ⭐️ Helper 함수로 안전하게 초기화
+self.low_cmd = create_empty_low_cmd()
+
