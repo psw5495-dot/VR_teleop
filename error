@@ -1,17 +1,23 @@
-(tv_env) (base) lgit@lgit-17Z90R-EP7NL:~/TeleVision$ source /opt/ros/humble/setup.bash
-cd ~/TeleVision
-# ⭐️ 성공했던 유선 인터페이스 이름 사용
-python3 g1_bridge_node.py enx80691ad9f138
-======================================================================
-🤖 Meta Quest3 → G1 Teleoperation 브릿지 시작
-⚠️  주의: 로봇 주변에 장애물이 없는지 확인하세요!
-======================================================================
-🌐 지정된 네트워크 인터페이스: enx80691ad9f138
-Traceback (most recent call last):
-  File "/home/lgit/TeleVision/g1_bridge_node.py", line 404, in <module>
-    main()
-  File "/home/lgit/TeleVision/g1_bridge_node.py", line 387, in main
-    bridge_node = G1TeleopBridge()
-  File "/home/lgit/TeleVision/g1_bridge_node.py", line 106, in __init__
-    self.low_cmd = LowCmd_()
-TypeError: LowCmd_.__init__() missing 5 required positional arguments: 'mode_pr', 'mode_machine', 'motor_cmd', 'reserve', and 'crc'
+from unitree_sdk2py.idl.unitree_hg.msg.dds_ import LowCmd_, LowState_, MotorCmd_
+
+
+def create_motor_cmd(mode=0, q=0.0, dq=0.0, tau=0.0, kp=0.0, kd=0.0, reserve=0):
+    """MotorCmd_ 안전 생성 (7개 필수 인자 완벽 대응)"""
+    return MotorCmd_(
+        mode=int(mode), q=float(q), dq=float(dq),
+        tau=float(tau), kp=float(kp), kd=float(kd), 
+        reserve=int(reserve)
+    )
+
+def create_empty_low_cmd():
+    """LowCmd_ 안전 생성 (5개 필수 인자 완벽 대응)"""
+    # 35개 모터 명령 배열 생성 (G1 사양)
+    motor_cmds = [create_motor_cmd() for _ in range(35)]
+    
+    return LowCmd_(
+        mode_pr=0,              # uint8: PR 모드
+        mode_machine=0,         # uint8: 머신 모드
+        motor_cmd=motor_cmds,   # MotorCmd_[35]: 모터 명령 배열
+        reserve=[0, 0, 0, 0],   # uint32[4]: 예약 필드
+        crc=0                   # uint32: CRC 체크섬
+    )
