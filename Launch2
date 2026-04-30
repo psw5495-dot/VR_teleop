@@ -27,6 +27,10 @@ ros2 topic echo /g1/target_pose
 
 
 
+# 유선 사용 시 (USB-이더넷 어댑터)
+python3 unitree_sdk2_ex.py enx80691ad9f138
+
+
 
 ssh unitree@192.168.123.26
 # G1에서 실행
