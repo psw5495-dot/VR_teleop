@@ -1,10 +1,13 @@
-@dataclass
-class TeleopConfig:
-    pos_scale: float = 0.3                              # 0.5→0.3 (더 작은 움직임)
-    robot_home_pos: Tuple[float, float, float] = (0.35, -0.20, 0.45)
-    max_dx: float = 0.08                                # 0.10→0.08
-    max_dy: float = 0.08
-    max_dz: float = 0.08
-    ema_alpha: float = 0.15
-    watchdog_timeout_s: float = 2.0                     # ⭐️ 0.3→2.0 (워치독 완화)
-    axis_sign: Tuple[float, float, float] = (1.0, -1.0, -1.0)
+def parse_frame_from_json(data: dict) -> VRFrame:
+    return VRFrame(
+        hand=data.get('hand', 'right'),
+        x=float(data.get('x', 0)),
+        y=float(data.get('y', 0)),
+        z=float(data.get('z', 0)),
+        qx=float(data.get('qx', 0)),
+        qy=float(data.get('qy', 0)),
+        qz=float(data.get('qz', 0)),
+        qw=float(data.get('qw', 1)),
+        # ⭐️ 타임스탬프를 서버 수신 시간으로 강제 설정 (Quest3 클럭 불일치 방지)
+        timestamp=time.time()
+    )
