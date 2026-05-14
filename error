@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
- 
+
 import sys
 import math
 import time
 from typing import Any, List, Tuple
- 
+
 # After `sudo dpkg -i sharpa-wave-sdk_*.deb`,
 # native module is under /usr/lib/sharpa-wave-sdk/python/
 sys.path.insert(0, "/usr/lib/sharpa-wave-sdk/python")
- 
+
 from sharpa import (
     SharpaWave,
     SharpaWaveManager,
@@ -17,503 +17,438 @@ from sharpa import (
     HandSide,
     ErrorCode,
 )
- 
- 
-print("Sharpa Wave Strong Grasp Example - Starting")
- 
- 
-# Joint names, indices 0..21
+
+
+# =============================================================================
+# Configuration - 모든 파라미터와 설정값
+# =============================================================================
+
+class Config:
+    """Sharpa Wave 강한 파지 제어를 위한 모든 설정값들"""
+    
+    # -------------------------------------------------------------------------
+    # 파지 시퀀스 파라미터 (실험 시 주로 조정하는 값들)
+    # -------------------------------------------------------------------------
+    PRE_GRASP_RATIO = 0.20          # 물체 접근 시 예비 파지 비율 (0.0~1.0)
+    GRASP_RATIO = 0.35              # 물체를 감싸는 최종 파지 비율 (0.0~1.0)
+    FINAL_CURRENT_COEFF = 0.4       # 강한 파지 시 목표 전류 계수 (처음엔 0.4~0.7 권장)
+    HOLD_TIME_S = 2.0               # 파지 상태 유지 시간 (초)
+    
+    # -------------------------------------------------------------------------
+    # 안전 제한값 (함부로 변경하지 말 것)
+    # -------------------------------------------------------------------------
+    SAFE_INITIAL_CURRENT_COEFF = 0.3    # 초기화 시 안전 전류 계수
+    SAFE_RELEASE_CURRENT_COEFF = 0.3     # 해제 시 안전 전류 계수
+    MAX_ALLOWED_CURRENT_COEFF = 0.9      # 코드상 전류 계수 상한 (1.0은 위험)
+    INITIAL_SPEED_COEFF = 0.3            # 초기 속도 계수
+    
+    # -------------------------------------------------------------------------
+    # 전류 점진적 증가 설정
+    # -------------------------------------------------------------------------
+    RAMP_START_COEFF = 0.4          # 전류 증가 시작점
+    RAMP_STEP = 0.1                 # 전류 증가 스텝 크기
+    RAMP_STEP_HOLD_S = 0.5          # 각 스텝 유지 시간 (초)
+    
+    # -------------------------------------------------------------------------
+    # 시퀀스 타이밍 (각 단계별 대기 시간)
+    # -------------------------------------------------------------------------
+    DELAY_AFTER_INIT = 0.3          # 초기화 후 대기
+    DELAY_AFTER_OPEN = 1.0          # 손 열기 후 대기
+    DELAY_AFTER_PRE_GRASP = 1.0     # 예비 파지 후 대기
+    DELAY_AFTER_GRASP = 1.0         # 본 파지 후 대기
+    DELAY_AFTER_CURRENT_REDUCE = 0.5 # 전류 감소 후 대기
+    
+    # -------------------------------------------------------------------------
+    # 관절 제어 설정
+    # -------------------------------------------------------------------------
+    # 파지 시 움직이지 않을 관절들 (좌우 벌림/모음 관절)
+    SKIP_MOVE_JOINT_INDICES = [3, 6, 10, 14, 17, 19]
+    
+    # 항상 고정할 관절과 각도 (degree)
+    FIXED_JOINT_DEG = {
+        0: 85,   # Thumb CMC Flexion/Extension
+        1: -18,  # Thumb CMC Abduction/Adduction
+    }
+
+
+# =============================================================================
+# Constants - 하드웨어 스펙 관련 상수들
+# =============================================================================
+
+# 관절 개수
+NUM_JOINTS = 22
+
+# 관절 이름 목록 (인덱스 0..21)
 JOINT_NAMES = [
-    "Thumb CMC Flexion/Extension",
-    "Thumb CMC Abduction/Adduction",
-    "Thumb MCP Flexion/Extension",
-    "Thumb MCP Abduction/Adduction",
-    "Thumb DIP Flexion/Extension",
- 
-    "Index MCP Flexion/Extension",
-    "Index MCP Abduction/Adduction",
-    "Index PIP Flexion/Extension",
-    "Index DIP Flexion/Extension",
- 
-    "Middle MCP Flexion/Extension",
-    "Middle MCP Abduction/Adduction",
-    "Middle PIP Flexion/Extension",
-    "Middle DIP Flexion/Extension",
- 
-    "Ring MCP Flexion/Extension",
-    "Ring MCP Abduction/Adduction",
-    "Ring PIP Flexion/Extension",
-    "Ring DIP Flexion/Extension",
- 
-    "Pinky CMC Flexion/Extension",
-    "Pinky MCP Flexion/Extension",
-    "Pinky MCP Abduction/Adduction",
-    "Pinky PIP Flexion/Extension",
-    "Pinky DIP Flexion/Extension",
+    "Thumb CMC Flexion/Extension",       # 0
+    "Thumb CMC Abduction/Adduction",     # 1
+    "Thumb MCP Flexion/Extension",       # 2
+    "Thumb MCP Abduction/Adduction",     # 3
+    "Thumb DIP Flexion/Extension",       # 4
+
+    "Index MCP Flexion/Extension",       # 5
+    "Index MCP Abduction/Adduction",     # 6
+    "Index PIP Flexion/Extension",       # 7
+    "Index DIP Flexion/Extension",       # 8
+
+    "Middle MCP Flexion/Extension",      # 9
+    "Middle MCP Abduction/Adduction",    # 10
+    "Middle PIP Flexion/Extension",      # 11
+    "Middle DIP Flexion/Extension",      # 12
+
+    "Ring MCP Flexion/Extension",        # 13
+    "Ring MCP Abduction/Adduction",      # 14
+    "Ring PIP Flexion/Extension",        # 15
+    "Ring DIP Flexion/Extension",        # 16
+
+    "Pinky CMC Flexion/Extension",       # 17
+    "Pinky MCP Flexion/Extension",       # 18
+    "Pinky MCP Abduction/Adduction",     # 19
+    "Pinky PIP Flexion/Extension",       # 20
+    "Pinky DIP Flexion/Extension",       # 21
 ]
- 
- 
-# Angle ranges in degrees
-# Based on Sharpa Wave Range of Motion table
-ANGLE_RANGES: List[Tuple[float, float]] = [
+
+# 각 관절의 동작 범위 (도 단위, Sharpa Wave 스펙 기준)
+ANGLE_RANGES = [
     (-5, 105),    # 0  Thumb CMC Flexion/Extension
     (-18, 18),    # 1  Thumb CMC Abduction/Adduction
     (-25, 75),    # 2  Thumb MCP Flexion/Extension
     (-18, 18),    # 3  Thumb MCP Abduction/Adduction
     (0, 95),      # 4  Thumb IP Flexion/Extension
- 
+
     (-10, 84),    # 5  Index MCP Flexion/Extension
     (-18, 18),    # 6  Index MCP Abduction/Adduction
     (0, 95),      # 7  Index PIP Flexion/Extension
     (0, 75),      # 8  Index DIP Flexion/Extension
- 
+
     (-10, 84),    # 9  Middle MCP Flexion/Extension
     (-18, 18),    # 10 Middle MCP Abduction/Adduction
     (0, 95),      # 11 Middle PIP Flexion/Extension
     (0, 75),      # 12 Middle DIP Flexion/Extension
- 
+
     (-10, 84),    # 13 Ring MCP Flexion/Extension
     (-18, 18),    # 14 Ring MCP Abduction/Adduction
     (0, 95),      # 15 Ring PIP Flexion/Extension
     (0, 75),      # 16 Ring DIP Flexion/Extension
- 
+
     (0, 25),      # 17 Pinky CMC Flexion/Extension
     (-10, 84),    # 18 Pinky MCP Flexion/Extension
     (-18, 18),    # 19 Pinky MCP Abduction/Adduction
     (0, 95),      # 20 Pinky PIP Flexion/Extension
     (0, 75),      # 21 Pinky DIP Flexion/Extension
 ]
- 
- 
-# 단순 파지 동작에서는 좌우 벌림/모음 관절은 크게 움직이지 않도록 제외
-# 기존 예제 기준 유지
-SKIP_MOVE_JOINT_INDEX = [3, 6, 10, 14, 17, 19]
- 
-# 고정할 관절 각도, degree 단위
-# 0: Thumb CMC Flexion/Extension
-# 1: Thumb CMC Abduction/Adduction
-FIXED_JOINT_DEG = {
-    0: 85,   # Thumb CMC FE 고정 각도
-    1: -18,   # Thumb CMC AA 고정 각도
-}
- 
- 
-# 안전 제한값
-SAFE_INITIAL_CURRENT_COEFF = 0.3
-SAFE_RELEASE_CURRENT_COEFF = 0.3
- 
-# 처음부터 1.0까지 올리는 것은 위험할 수 있으므로 코드상 상한을 둠
-MAX_ALLOWED_CURRENT_COEFF = 0.9
- 
- 
+
+
+# =============================================================================
+# Device Management
+# =============================================================================
+
 def auto_detect_hand() -> Any:
-    """
-    Automatically detect Sharpa Wave device and connect to the first found device.
- 
-    Returns:
-        hand object returned by manager.connect(sn)
-    """
+    """Sharpa Wave 디바이스를 자동으로 감지하고 첫 번째 발견된 디바이스에 연결합니다."""
     print("Searching for devices...")
- 
+
     try:
         manager = SharpaWaveManager.get_instance()
- 
-        # Wait for device discovery
         time.sleep(1.0)
- 
+
         while True:
             devices = manager.get_all_device_sn()
- 
+
             if not devices:
                 print("No available devices found. Retrying...")
                 time.sleep(1.0)
                 continue
- 
+
             print(f"Device found: {devices[0]}")
-            hand = manager.connect(devices[0])
-            return hand
- 
+            return manager.connect(devices[0])
+
     except Exception as e:
         print(f"Failed to connect to device: {str(e)}")
         raise
- 
- 
-def initialize(hand) -> bool:
-    """
-    Initialize hand control parameters.
-    """
-    print("Initializing hand...")
- 
-    error = hand.set_control_mode(ControlMode.POSITION)
-    if error.code != 0:
-        print(f"Failed to set control mode: {error.message}")
-        return False
- 
-    # 낮은 속도로 시작
-    error = hand.set_speed_coeff(0.3)
-    if error.code != 0:
-        print(f"Failed to set speed coeff: {error.message}")
-        return False
- 
-    # 낮은 전류로 시작
-    error = hand.set_current_coeff(SAFE_INITIAL_CURRENT_COEFF)
-    if error.code != 0:
-        print(f"Failed to set current coeff: {error.message}")
-        return False
- 
-    # SDK에서 제어하도록 설정
-    error = hand.set_control_source(ControlSource.SDK)
-    if error.code != 0:
-        print(f"Failed to set control source: {error.message}")
-        return False
- 
-    print("Hand initialization complete")
-    return True
- 
- 
-def check_error(error, message: str) -> bool:
-    """
-    SDK error object checker.
-    """
-    if error.code != 0:
-        print(f"{message}: {error.message}")
-        return False
-    return True
- 
- 
-def print_joint_positions_degree(hand):
-    """
-    Print current joint positions in degree.
-    """
-    error, angles = hand.get_joint_position_degree()
- 
-    if error.code != 0:
-        print(f"Failed to get joint position(degree): {error.message}")
-        return
- 
-    print("Current joint angles(deg):")
-    for i, angle in enumerate(angles):
-        joint_name = JOINT_NAMES[i] if i < len(JOINT_NAMES) else f"Joint {i}"
-        print(f"  {i:02d} | {joint_name}: {angle:.2f}")
- 
- 
-def set_hand_open(hand, interpolation: bool = True) -> bool:
-    """
-    Open hand by setting joints to open pose.
-    Fixed joints are kept at FIXED_JOINT_DEG.
-    """
-    print("Opening hand...")
- 
-    open_pose = [0.0] * 22
- 
-    # 고정 관절은 open 동작에서도 지정 각도로 유지
-    for joint_index, fixed_deg in FIXED_JOINT_DEG.items():
-        open_pose[joint_index] = math.radians(fixed_deg)
- 
-    error = hand.set_joint_position(open_pose, interpolation)
- 
-    return check_error(error, "Failed to open hand")
- 
-def make_grasp_pose(close_ratio: float = 0.6) -> List:
-    """
-    Create grasp pose.
- 
-    Args:
-        close_ratio:
-            0.0 = opened pose near lower angle
-            1.0 = closed pose near upper angle
- 
-    Returns:
-        angle_list in radians, length 22
-    """
-    close_ratio = max(0.0, min(1.0, close_ratio))
- 
-    angle_list = [0.0] * 22
- 
-    for i in range(22):
-        # 1. 고정 관절은 항상 지정한 값으로 유지
-        if i in FIXED_JOINT_DEG:
-            angle_list[i] = math.radians(FIXED_JOINT_DEG[i])
-            continue
- 
-        # 2. 움직이지 않을 관절은 0도로 유지
-        if i in SKIP_MOVE_JOINT_INDEX:
-            angle_list[i] = 0.0
-            continue
- 
-        # 3. 나머지 관절은 close_ratio에 따라 닫기
-        lo_deg, hi_deg = ANGLE_RANGES[i]
-        target_angle_deg = lo_deg + (hi_deg - lo_deg) * close_ratio
-        angle_list[i] = math.radians(target_angle_deg)
- 
-    return angle_list
- 
- 
-def set_grasp_pose(
-    hand,
-    close_ratio: float = 0.6,
-    interpolation: bool = True,
-) -> bool:
-    """
-    Move hand to grasp pose.
- 
-    Args:
-        close_ratio:
-            0.0 = open
-            1.0 = maximum angle from ANGLE_RANGES
-        interpolation:
-            True means smooth movement if SDK supports interpolation mode.
-    """
-    print(f"Moving to grasp pose. close_ratio={close_ratio:.2f}")
- 
-    grasp_pose = make_grasp_pose(close_ratio)
-    error = hand.set_joint_position(grasp_pose, interpolation)
- 
-    return check_error(error, "Failed to set grasp pose")
- 
- 
-def ramp_current_for_strong_grip(
-    hand,
-    start_coeff: float = 0.3,
-    end_coeff: float = 0.8,
-    step: float = 0.1,
-    step_hold_s: float = 0.5,
-) -> bool:
-    """
-    Gradually increase current coefficient.
- 
-    This is safer than setting high current instantly.
- 
-    Args:
-        start_coeff:
-            Starting current coefficient.
-        end_coeff:
-            Target current coefficient.
-            Code clamps this value to MAX_ALLOWED_CURRENT_COEFF.
-        step:
-            Increase amount per step.
-        step_hold_s:
-            Holding time for each step.
-    """
-    if step <= 0:
-        print("Invalid step. step should be positive.")
-        return False
- 
-    end_coeff = min(end_coeff, MAX_ALLOWED_CURRENT_COEFF)
-    start_coeff = max(0.0, min(start_coeff, end_coeff))
- 
-    coeff = start_coeff
- 
-    print(
-        f"Ramping current coeff from {start_coeff:.2f} "
-        f"to {end_coeff:.2f}, step={step:.2f}"
-    )
- 
-    while coeff <= end_coeff + 1e-9:
-        print(f"Setting current coeff: {coeff:.2f}")
- 
-        error = hand.set_current_coeff(coeff)
-        if error.code != 0:
-            print(f"Failed to set current coeff {coeff:.2f}: {error.message}")
-            return False
- 
-        time.sleep(step_hold_s)
-        coeff += step
- 
-    return True
- 
- 
-def grasp_object_strongly(
-    hand,
-    pre_grasp_ratio: float = 0.45,
-    grasp_ratio: float = 0.45,
-    final_current_coeff: float = 0.8,
-    hold_time_s: float = 3.0,
-) -> bool:
-    """
-    Strong grasp sequence.
- 
-    Sequence:
-        1. Set low current
-        2. Open hand
-        3. Move to pre-grasp pose
-        4. Move to deeper grasp pose
-        5. Gradually increase current
-        6. Hold object
-        7. Reduce current
-        8. Open hand
- 
-    Args:
-        pre_grasp_ratio:
-            Initial closing ratio before strong grasp.
-        grasp_ratio:
-            Final closing ratio around object.
-        final_current_coeff:
-            Final current coefficient.
-            Clamped by MAX_ALLOWED_CURRENT_COEFF.
-        hold_time_s:
-            Holding time after current ramp.
-    """
-    interpolation = True
- 
-    print("========== Strong Grasp Sequence Start ==========")
- 
-    final_current_coeff = min(final_current_coeff, MAX_ALLOWED_CURRENT_COEFF)
- 
-    # 1. 낮은 전류로 시작
-    print("[1] Set initial low current")
-    error = hand.set_current_coeff(SAFE_INITIAL_CURRENT_COEFF)
-    if not check_error(error, "Failed to set initial current coeff"):
-        return False
- 
-    time.sleep(0.3)
- 
-    # 2. 손 열기
-    print("[2] Open hand")
-    if not set_hand_open(hand, interpolation):
-        return False
- 
-    time.sleep(1.0)
- 
-    # 3. 물체 접근용 pre-grasp 자세
-    print("[3] Move to pre-grasp pose")
-    if not set_grasp_pose(hand, close_ratio=pre_grasp_ratio, interpolation=interpolation):
-        return False
- 
-    time.sleep(1.0)
- 
-    # 4. 물체를 감싸는 grasp 자세
-    print("[4] Move to grasp pose")
-    if not set_grasp_pose(hand, close_ratio=grasp_ratio, interpolation=interpolation):
-        return False
- 
-    time.sleep(1.0)
- 
-    # 5. 전류 계수 단계적 증가
-    print("[5] Increase grip current gradually")
-    if not ramp_current_for_strong_grip(
-        hand,
-        start_coeff=0.4,
-        end_coeff=final_current_coeff,
-        step=0.1,
-        step_hold_s=0.5,
-    ):
-        return False
- 
-    # 6. 꽉 쥔 상태 유지
-    print(f"[6] Holding object for {hold_time_s:.1f} seconds")
-    time.sleep(hold_time_s)
- 
-    print_joint_positions_degree(hand)
- 
-    # 7. 손을 열기 전에 전류 낮추기
-    print("[7] Reduce current before release")
-    error = hand.set_current_coeff(SAFE_RELEASE_CURRENT_COEFF)
-    check_error(error, "Failed to reduce current coeff")
- 
-    time.sleep(0.5)
- 
-    # 8. 손 열기
-    print("[8] Open hand")
-    set_hand_open(hand, interpolation)
- 
-    time.sleep(1.0)
- 
-    print("========== Strong Grasp Sequence Finished ==========")
-    return True
- 
- 
-def safe_shutdown(hand):
-    """
-    Try to safely release hand and disconnect all devices.
-    """
+
+
+def safe_shutdown(hand) -> None:
+    """손을 안전하게 해제하고 모든 디바이스 연결을 종료합니다."""
     print("Safe shutdown started")
- 
+
     try:
         if hand is not None:
-            # 전류 낮추기
+            # 전류 감소
             try:
-                hand.set_current_coeff(SAFE_RELEASE_CURRENT_COEFF)
+                hand.set_current_coeff(Config.SAFE_RELEASE_CURRENT_COEFF)
             except Exception as e:
                 print(f"Warning: failed to reduce current coeff during shutdown: {e}")
- 
+
             # 손 열기
             try:
-                hand.set_joint_position([0.0] * 22, True)
+                hand.set_joint_position([0.0] * NUM_JOINTS, True)
                 time.sleep(1.0)
             except Exception as e:
                 print(f"Warning: failed to open hand during shutdown: {e}")
- 
-            # hand stop
+
+            # 손 정지
             try:
                 hand.stop()
             except Exception as e:
                 print(f"Warning: failed to stop hand: {e}")
- 
+
     finally:
         try:
             SharpaWaveManager.get_instance().disconnect_all()
         except Exception as e:
             print(f"Warning: failed to disconnect all: {e}")
- 
+
     print("Safe shutdown complete")
- 
- 
+
+
+# =============================================================================
+# Initialization
+# =============================================================================
+
+def initialize(hand) -> bool:
+    """손 제어 파라미터를 초기화합니다."""
+    print("Initializing hand...")
+
+    initialization_steps = [
+        (hand.set_control_mode, ControlMode.POSITION, "control mode"),
+        (hand.set_speed_coeff, Config.INITIAL_SPEED_COEFF, "speed coefficient"),
+        (hand.set_current_coeff, Config.SAFE_INITIAL_CURRENT_COEFF, "current coefficient"),
+        (hand.set_control_source, ControlSource.SDK, "control source"),
+    ]
+
+    for func, param, description in initialization_steps:
+        error = func(param)
+        if error.code != 0:
+            print(f"Failed to set {description}: {error.message}")
+            return False
+
+    print("Hand initialization complete")
+    return True
+
+
+# =============================================================================
+# Utilities
+# =============================================================================
+
+def check_error(error, message: str) -> bool:
+    """SDK 에러 객체를 확인하고 실패 시 메시지를 출력합니다."""
+    if error.code != 0:
+        print(f"{message}: {error.message}")
+        return False
+    return True
+
+
+def print_joint_positions_degree(hand) -> None:
+    """현재 관절 위치를 도 단위로 출력합니다."""
+    error, angles = hand.get_joint_position_degree()
+
+    if error.code != 0:
+        print(f"Failed to get joint position(degree): {error.message}")
+        return
+
+    print("Current joint angles (deg):")
+    for i, angle in enumerate(angles):
+        name = JOINT_NAMES[i] if i < len(JOINT_NAMES) else f"Joint {i}"
+        print(f"  {i:02d} | {name}: {angle:.2f}")
+
+
+# =============================================================================
+# Pose Generation
+# =============================================================================
+
+def make_open_pose() -> List[float]:
+    """열린 손 자세를 생성합니다. 고정 관절은 Config.FIXED_JOINT_DEG 값을 유지합니다."""
+    pose = [0.0] * NUM_JOINTS
+
+    for joint_index, fixed_deg in Config.FIXED_JOINT_DEG.items():
+        pose[joint_index] = math.radians(fixed_deg)
+
+    return pose
+
+
+def make_grasp_pose(close_ratio: float) -> List[float]:
+    """파지 자세를 생성합니다.
+    
+    Args:
+        close_ratio: 0.0 = 완전 열림 (하한각), 1.0 = 완전 닫힘 (상한각)
+    
+    Returns:
+        라디안 단위의 관절 각도 리스트 (길이: NUM_JOINTS)
+    """
+    close_ratio = max(0.0, min(1.0, close_ratio))
+    pose = [0.0] * NUM_JOINTS
+
+    for i in range(NUM_JOINTS):
+        if i in Config.FIXED_JOINT_DEG:
+            # 고정 관절은 항상 지정된 각도 유지
+            pose[i] = math.radians(Config.FIXED_JOINT_DEG[i])
+        elif i in Config.SKIP_MOVE_JOINT_INDICES:
+            # 움직이지 않을 관절은 0도 유지
+            pose[i] = 0.0
+        else:
+            # 나머지 관절은 close_ratio에 따라 각도 계산
+            lo_deg, hi_deg = ANGLE_RANGES[i]
+            target_deg = lo_deg + (hi_deg - lo_deg) * close_ratio
+            pose[i] = math.radians(target_deg)
+
+    return pose
+
+
+# =============================================================================
+# Hand Motion Commands
+# =============================================================================
+
+def set_hand_open(hand, interpolation: bool = True) -> bool:
+    """손을 열린 자세로 움직입니다."""
+    print("Opening hand...")
+    error = hand.set_joint_position(make_open_pose(), interpolation)
+    return check_error(error, "Failed to open hand")
+
+
+def set_grasp_pose(hand, close_ratio: float, interpolation: bool = True) -> bool:
+    """손을 지정된 파지 자세로 움직입니다."""
+    print(f"Moving to grasp pose. close_ratio={close_ratio:.2f}")
+    error = hand.set_joint_position(make_grasp_pose(close_ratio), interpolation)
+    return check_error(error, "Failed to set grasp pose")
+
+
+def ramp_current_gradually(hand) -> bool:
+    """전류 계수를 점진적으로 증가시켜 안전하게 강한 힘을 발생시킵니다."""
+    start_coeff = Config.RAMP_START_COEFF
+    end_coeff = min(Config.FINAL_CURRENT_COEFF, Config.MAX_ALLOWED_CURRENT_COEFF)
+    step = Config.RAMP_STEP
+
+    print(f"Ramping current coefficient: {start_coeff:.2f} → {end_coeff:.2f} (step: {step:.2f})")
+
+    current_coeff = start_coeff
+    while current_coeff <= end_coeff + 1e-9:
+        print(f"  Setting current coefficient: {current_coeff:.2f}")
+        error = hand.set_current_coeff(current_coeff)
+        if not check_error(error, f"Failed to set current coeff {current_coeff:.2f}"):
+            return False
+
+        time.sleep(Config.RAMP_STEP_HOLD_S)
+        current_coeff += step
+
+    return True
+
+
+# =============================================================================
+# Main Grasp Sequence
+# =============================================================================
+
+def execute_strong_grasp_sequence(hand) -> bool:
+    """강한 파지 시퀀스를 실행합니다.
+    
+    시퀀스:
+        1. 낮은 전류로 시작
+        2. 손 열기
+        3. 예비 파지 자세로 이동
+        4. 본 파지 자세로 이동
+        5. 전류 점진적 증가
+        6. 파지 상태 유지
+        7. 전류 감소
+        8. 손 열기
+    """
+    interpolation = True
+
+    print("========== Strong Grasp Sequence Start ==========")
+
+    # 1. 낮은 전류로 시작
+    print("[1] Set initial low current")
+    error = hand.set_current_coeff(Config.SAFE_INITIAL_CURRENT_COEFF)
+    if not check_error(error, "Failed to set initial current coeff"):
+        return False
+    time.sleep(Config.DELAY_AFTER_INIT)
+
+    # 2. 손 열기
+    print("[2] Open hand")
+    if not set_hand_open(hand, interpolation):
+        return False
+    time.sleep(Config.DELAY_AFTER_OPEN)
+
+    # 3. 예비 파지 자세
+    print("[3] Move to pre-grasp pose")
+    if not set_grasp_pose(hand, Config.PRE_GRASP_RATIO, interpolation):
+        return False
+    time.sleep(Config.DELAY_AFTER_PRE_GRASP)
+
+    # 4. 본 파지 자세
+    print("[4] Move to grasp pose")
+    if not set_grasp_pose(hand, Config.GRASP_RATIO, interpolation):
+        return False
+    time.sleep(Config.DELAY_AFTER_GRASP)
+
+    # 5. 전류 점진적 증가
+    print("[5] Increase grip current gradually")
+    if not ramp_current_gradually(hand):
+        return False
+
+    # 6. 파지 상태 유지
+    print(f"[6] Holding object for {Config.HOLD_TIME_S:.1f} seconds")
+    time.sleep(Config.HOLD_TIME_S)
+    print_joint_positions_degree(hand)
+
+    # 7. 전류 감소
+    print("[7] Reduce current before release")
+    error = hand.set_current_coeff(Config.SAFE_RELEASE_CURRENT_COEFF)
+    check_error(error, "Failed to reduce current coeff")
+    time.sleep(Config.DELAY_AFTER_CURRENT_REDUCE)
+
+    # 8. 손 열기
+    print("[8] Open hand")
+    set_hand_open(hand, interpolation)
+    time.sleep(Config.DELAY_AFTER_OPEN)
+
+    print("========== Strong Grasp Sequence Finished ==========")
+    return True
+
+
+# =============================================================================
+# Main Execution
+# =============================================================================
+
 if __name__ == "__main__":
+    print("Sharpa Wave Strong Grasp Example - Starting")
     hand = None
- 
+
     try:
         print("Sharpa Wave Example - Auto Detect Hand")
- 
         hand = auto_detect_hand()
- 
+
         if hand is None:
             print("Error: No available device found")
             sys.exit(1)
- 
+
         print("Sharpa Wave Example - Init Hand Running Mode")
- 
         if not initialize(hand):
             print("Error: Failed to initialize hand")
             sys.exit(1)
- 
+
         print("Sharpa Wave Example - Start Hand Running Mode")
         hand.start()
- 
-        # 시작 전 초기 위치
+
+        # 시작 전 초기 위치로 이동
         set_hand_open(hand, interpolation=True)
         time.sleep(1.0)
- 
+
         print("Sharpa Wave Example - Run Strong Grasp")
- 
-        # 처음 테스트 시 아래 값을 낮게 잡는 것을 권장:
-        # pre_grasp_ratio=0.35~0.45
-        # grasp_ratio=0.50~0.65
-        # final_current_coeff=0.5~0.7
-        #
-        # 점진적으로 올리고 싶으면:
-        # grasp_ratio=0.75
-        # final_current_coeff=0.8 또는 0.9
-        success = grasp_object_strongly(
-            hand,
-            pre_grasp_ratio=0.20,
-            grasp_ratio=0.35,
-            final_current_coeff=0.4,
-            hold_time_s=2.0,
-        )
- 
+        
+        # 강한 파지 시퀀스 실행 (모든 파라미터는 Config 클래스에서 관리)
+        success = execute_strong_grasp_sequence(hand)
+
         if not success:
             print("Strong grasp sequence failed")
             sys.exit(1)
- 
+
         print("Sharpa Wave Example - Completed Successfully")
- 
+
     except KeyboardInterrupt:
         print("\nKeyboardInterrupt received. Stopping safely...")
- 
+
     except Exception as e:
         print(f"Unexpected error: {e}")
- 
+
     finally:
         safe_shutdown(hand)
         print("Sharpa Wave Example - Stopped")
