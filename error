@@ -3,10 +3,10 @@
 import sys
 import math
 import time
-from typing import Any, List, Tuple
+import csv
+from datetime import datetime
+from typing import Any, List, Tuple, Optional, Dict
 
-# After `sudo dpkg -i sharpa-wave-sdk_*.deb`,
-# native module is under /usr/lib/sharpa-wave-sdk/python/
 sys.path.insert(0, "/usr/lib/sharpa-wave-sdk/python")
 
 from sharpa import (
@@ -20,123 +20,174 @@ from sharpa import (
 
 
 # =============================================================================
-# Configuration - 모든 파라미터와 설정값
+# Configuration - 최대 악력 측정을 위한 모든 설정값
 # =============================================================================
 
 class Config:
-    """Sharpa Wave 강한 파지 제어를 위한 모든 설정값들"""
+    """Sharpa Wave 최대 악력 측정을 위한 모든 설정값들"""
     
     # -------------------------------------------------------------------------
-    # 파지 시퀀스 파라미터 (실험 시 주로 조정하는 값들)
+    # 최대 악력 측정용 파라미터 (극한 성능 추출을 위한 설정)
     # -------------------------------------------------------------------------
-    PRE_GRASP_RATIO = 0.20          # 물체 접근 시 예비 파지 비율 (0.0~1.0)
-    GRASP_RATIO = 0.35              # 물체를 감싸는 최종 파지 비율 (0.0~1.0)
-    FINAL_CURRENT_COEFF = 0.4       # 강한 파지 시 목표 전류 계수 (처음엔 0.4~0.7 권장)
-    HOLD_TIME_S = 2.0               # 파지 상태 유지 시간 (초)
+    PRE_GRASP_RATIO = 0.30          # 악력계 접촉을 위한 예비 파지 비율
+    GRASP_RATIO = 1.0               # 최대 파지 비율 (100% 닫힘)
+    FINAL_CURRENT_COEFF = 1.0       # 최대 전류 계수 (100% 파워)
+    HOLD_TIME_S = 5.0               # 최대 악력 유지 시간 (측정용)
     
     # -------------------------------------------------------------------------
-    # 안전 제한값 (함부로 변경하지 말 것)
+    # 안전 제한값 (최대 출력을 위해 상한 해제)
     # -------------------------------------------------------------------------
-    SAFE_INITIAL_CURRENT_COEFF = 0.3    # 초기화 시 안전 전류 계수
-    SAFE_RELEASE_CURRENT_COEFF = 0.3     # 해제 시 안전 전류 계수
-    MAX_ALLOWED_CURRENT_COEFF = 0.9      # 코드상 전류 계수 상한 (1.0은 위험)
-    INITIAL_SPEED_COEFF = 0.3            # 초기 속도 계수
+    SAFE_INITIAL_CURRENT_COEFF = 0.3
+    SAFE_RELEASE_CURRENT_COEFF = 0.2
+    MAX_ALLOWED_CURRENT_COEFF = 1.0     # 최대 전류 허용 (주의: 위험할 수 있음)
+    INITIAL_SPEED_COEFF = 0.3
     
     # -------------------------------------------------------------------------
-    # 전류 점진적 증가 설정
+    # 전류 점진적 증가 설정 (안전한 최대 출력 도달)
     # -------------------------------------------------------------------------
-    RAMP_START_COEFF = 0.4          # 전류 증가 시작점
-    RAMP_STEP = 0.1                 # 전류 증가 스텝 크기
-    RAMP_STEP_HOLD_S = 0.5          # 각 스텝 유지 시간 (초)
+    RAMP_START_COEFF = 0.4
+    RAMP_STEP = 0.08                # 더 세밀한 스텝으로 안전성 확보
+    RAMP_STEP_HOLD_S = 0.8          # 각 스텝 안정화 시간
     
     # -------------------------------------------------------------------------
-    # 시퀀스 타이밍 (각 단계별 대기 시간)
+    # Stall 감지 설정 (내부 추정용)
     # -------------------------------------------------------------------------
-    DELAY_AFTER_INIT = 0.3          # 초기화 후 대기
-    DELAY_AFTER_OPEN = 1.0          # 손 열기 후 대기
-    DELAY_AFTER_PRE_GRASP = 1.0     # 예비 파지 후 대기
-    DELAY_AFTER_GRASP = 1.0         # 본 파지 후 대기
-    DELAY_AFTER_CURRENT_REDUCE = 0.5 # 전류 감소 후 대기
+    STALL_THRESHOLD_DEG = 1.0       # 관절 움직임 임계값 (도)
+    STALL_CONFIRM_COUNT = 3         # 연속 stall 판정 횟수
+    
+    # -------------------------------------------------------------------------
+    # 시퀀스 타이밍
+    # -------------------------------------------------------------------------
+    DELAY_AFTER_INIT = 0.5
+    DELAY_AFTER_OPEN = 2.0          # 악력계 배치 시간 여유
+    DELAY_AFTER_PRE_GRASP = 1.5
+    DELAY_AFTER_GRASP = 1.0
+    DELAY_AFTER_RELEASE = 1.5
     
     # -------------------------------------------------------------------------
     # 관절 제어 설정
     # -------------------------------------------------------------------------
-    # 파지 시 움직이지 않을 관절들 (좌우 벌림/모음 관절)
-    SKIP_MOVE_JOINT_INDICES = [3, 6, 10, 14, 17, 19]
-    
-    # 항상 고정할 관절과 각도 (degree)
+    SKIP_MOVE_JOINT_INDICES = [3, 6, 10, 14, 17, 19]   # 벌림/모음 관절 제외
     FIXED_JOINT_DEG = {
-        0: 85,   # Thumb CMC Flexion/Extension
-        1: -18,  # Thumb CMC Abduction/Adduction
+        0: 85,    # Thumb CMC Flexion/Extension
+        1: -18,   # Thumb CMC Abduction/Adduction
     }
+    
+    # -------------------------------------------------------------------------
+    # 데이터 저장 설정
+    # -------------------------------------------------------------------------
+    SAVE_CSV = True
+    CSV_DIR = "."
 
 
 # =============================================================================
-# Constants - 하드웨어 스펙 관련 상수들
+# Constants
 # =============================================================================
 
-# 관절 개수
 NUM_JOINTS = 22
 
-# 관절 이름 목록 (인덱스 0..21)
 JOINT_NAMES = [
-    "Thumb CMC Flexion/Extension",       # 0
-    "Thumb CMC Abduction/Adduction",     # 1
-    "Thumb MCP Flexion/Extension",       # 2
-    "Thumb MCP Abduction/Adduction",     # 3
-    "Thumb DIP Flexion/Extension",       # 4
-
-    "Index MCP Flexion/Extension",       # 5
-    "Index MCP Abduction/Adduction",     # 6
-    "Index PIP Flexion/Extension",       # 7
-    "Index DIP Flexion/Extension",       # 8
-
-    "Middle MCP Flexion/Extension",      # 9
-    "Middle MCP Abduction/Adduction",    # 10
-    "Middle PIP Flexion/Extension",      # 11
-    "Middle DIP Flexion/Extension",      # 12
-
-    "Ring MCP Flexion/Extension",        # 13
-    "Ring MCP Abduction/Adduction",      # 14
-    "Ring PIP Flexion/Extension",        # 15
-    "Ring DIP Flexion/Extension",        # 16
-
-    "Pinky CMC Flexion/Extension",       # 17
-    "Pinky MCP Flexion/Extension",       # 18
-    "Pinky MCP Abduction/Adduction",     # 19
-    "Pinky PIP Flexion/Extension",       # 20
-    "Pinky DIP Flexion/Extension",       # 21
+    "Thumb CMC Flexion/Extension", "Thumb CMC Abduction/Adduction",
+    "Thumb MCP Flexion/Extension", "Thumb MCP Abduction/Adduction", "Thumb DIP Flexion/Extension",
+    "Index MCP Flexion/Extension", "Index MCP Abduction/Adduction", "Index PIP Flexion/Extension", "Index DIP Flexion/Extension",
+    "Middle MCP Flexion/Extension", "Middle MCP Abduction/Adduction", "Middle PIP Flexion/Extension", "Middle DIP Flexion/Extension",
+    "Ring MCP Flexion/Extension", "Ring MCP Abduction/Adduction", "Ring PIP Flexion/Extension", "Ring DIP Flexion/Extension",
+    "Pinky CMC Flexion/Extension", "Pinky MCP Flexion/Extension", "Pinky MCP Abduction/Adduction", "Pinky PIP Flexion/Extension", "Pinky DIP Flexion/Extension",
 ]
 
-# 각 관절의 동작 범위 (도 단위, Sharpa Wave 스펙 기준)
 ANGLE_RANGES = [
-    (-5, 105),    # 0  Thumb CMC Flexion/Extension
-    (-18, 18),    # 1  Thumb CMC Abduction/Adduction
-    (-25, 75),    # 2  Thumb MCP Flexion/Extension
-    (-18, 18),    # 3  Thumb MCP Abduction/Adduction
-    (0, 95),      # 4  Thumb IP Flexion/Extension
-
-    (-10, 84),    # 5  Index MCP Flexion/Extension
-    (-18, 18),    # 6  Index MCP Abduction/Adduction
-    (0, 95),      # 7  Index PIP Flexion/Extension
-    (0, 75),      # 8  Index DIP Flexion/Extension
-
-    (-10, 84),    # 9  Middle MCP Flexion/Extension
-    (-18, 18),    # 10 Middle MCP Abduction/Adduction
-    (0, 95),      # 11 Middle PIP Flexion/Extension
-    (0, 75),      # 12 Middle DIP Flexion/Extension
-
-    (-10, 84),    # 13 Ring MCP Flexion/Extension
-    (-18, 18),    # 14 Ring MCP Abduction/Adduction
-    (0, 95),      # 15 Ring PIP Flexion/Extension
-    (0, 75),      # 16 Ring DIP Flexion/Extension
-
-    (0, 25),      # 17 Pinky CMC Flexion/Extension
-    (-10, 84),    # 18 Pinky MCP Flexion/Extension
-    (-18, 18),    # 19 Pinky MCP Abduction/Adduction
-    (0, 95),      # 20 Pinky PIP Flexion/Extension
-    (0, 75),      # 21 Pinky DIP Flexion/Extension
+    (-5, 105), (-18, 18), (-25, 75), (-18, 18), (0, 95),
+    (-10, 84), (-18, 18), (0, 95), (0, 75),
+    (-10, 84), (-18, 18), (0, 95), (0, 75),
+    (-10, 84), (-18, 18), (0, 95), (0, 75),
+    (0, 25), (-10, 84), (-18, 18), (0, 95), (0, 75),
 ]
+
+
+# =============================================================================
+# Data Classes - 측정 결과 구조화
+# =============================================================================
+
+class GripMeasurementData:
+    """각 측정 스텝의 데이터를 저장하는 클래스"""
+    
+    def __init__(self, current_coeff: float, timestamp: float):
+        self.current_coeff = current_coeff
+        self.timestamp = timestamp
+        self.joint_angles_deg: Optional[List[float]] = None
+        self.joint_torques: Optional[List[float]] = None
+        self.joint_currents: Optional[List[float]] = None
+        self.estimated_grip_force = 0.0
+    
+    def calculate_grip_estimate(self) -> float:
+        """관절 토크나 전류를 기반으로 악력을 추정합니다."""
+        if self.joint_torques:
+            # 주요 굴곡 관절의 토크 합산
+            active_joints = [i for i in range(NUM_JOINTS) 
+                           if i not in Config.SKIP_MOVE_JOINT_INDICES 
+                           and i not in Config.FIXED_JOINT_DEG]
+            
+            total_torque = sum(abs(self.joint_torques[i]) 
+                             for i in active_joints 
+                             if i < len(self.joint_torques))
+            
+            # 토크를 악력으로 변환 (근사치, 실제 변환은 링크 길이와 기어비 필요)
+            self.estimated_grip_force = total_torque * 0.1  # 임시 변환 계수
+            return self.estimated_grip_force
+        
+        # 토크 데이터가 없으면 전류 계수를 대리 지표로 사용
+        self.estimated_grip_force = self.current_coeff * 100  # 임시 스케일링
+        return self.estimated_grip_force
+
+
+class MaxGripResult:
+    """최대 악력 측정 결과 전체를 관리하는 클래스"""
+    
+    def __init__(self):
+        self.measurement_data: List[GripMeasurementData] = []
+        self.max_grip_data: Optional[GripMeasurementData] = None
+        self.stall_detected = False
+        self.stall_current_coeff: Optional[float] = None
+        self.external_measurement_note = ""
+    
+    def add_measurement(self, data: GripMeasurementData):
+        """측정 데이터를 추가합니다."""
+        self.measurement_data.append(data)
+    
+    def finalize_result(self):
+        """측정 완료 후 최대값을 결정합니다."""
+        if not self.measurement_data:
+            return
+        
+        # 추정 악력 기준으로 최대값 선정
+        self.max_grip_data = max(self.measurement_data, 
+                               key=lambda x: x.calculate_grip_estimate())
+    
+    def print_summary(self):
+        """측정 결과를 출력합니다."""
+        print("\n" + "="*70)
+        print("                   최대 악력 측정 결과")
+        print("="*70)
+        
+        if not self.max_grip_data:
+            print("측정 데이터가 없습니다.")
+            return
+        
+        print(f"총 측정 포인트 수: {len(self.measurement_data)}")
+        print(f"Stall 감지 여부: {'예' if self.stall_detected else '아니오'}")
+        
+        if self.stall_detected:
+            print(f"Stall 발생 전류 계수: {self.stall_current_coeff:.2f}")
+        
+        max_data = self.max_grip_data
+        print(f"최대 전류 계수: {max_data.current_coeff:.2f}")
+        print(f"추정 악력 지표: {max_data.estimated_grip_force:.2f}")
+        
+        if self.external_measurement_note:
+            print(f"\n외부 측정 안내:")
+            print(f"{self.external_measurement_note}")
+        
+        print("="*70)
 
 
 # =============================================================================
@@ -144,264 +195,400 @@ ANGLE_RANGES = [
 # =============================================================================
 
 def auto_detect_hand() -> Any:
-    """Sharpa Wave 디바이스를 자동으로 감지하고 첫 번째 발견된 디바이스에 연결합니다."""
-    print("Searching for devices...")
-
+    """Sharpa Wave 디바이스를 자동 감지하고 연결합니다."""
+    print("디바이스를 검색 중...")
+    
     try:
         manager = SharpaWaveManager.get_instance()
         time.sleep(1.0)
-
+        
         while True:
             devices = manager.get_all_device_sn()
-
             if not devices:
-                print("No available devices found. Retrying...")
+                print("사용 가능한 디바이스가 없습니다. 재시도 중...")
                 time.sleep(1.0)
                 continue
-
-            print(f"Device found: {devices[0]}")
+            
+            print(f"디바이스 발견: {devices[0]}")
             return manager.connect(devices[0])
-
+    
     except Exception as e:
-        print(f"Failed to connect to device: {str(e)}")
+        print(f"디바이스 연결 실패: {str(e)}")
         raise
 
 
 def safe_shutdown(hand) -> None:
-    """손을 안전하게 해제하고 모든 디바이스 연결을 종료합니다."""
-    print("Safe shutdown started")
-
+    """안전한 시스템 종료를 수행합니다."""
+    print("안전 종료 절차 시작...")
+    
     try:
         if hand is not None:
-            # 전류 감소
             try:
                 hand.set_current_coeff(Config.SAFE_RELEASE_CURRENT_COEFF)
+                time.sleep(0.5)
             except Exception as e:
-                print(f"Warning: failed to reduce current coeff during shutdown: {e}")
-
-            # 손 열기
+                print(f"경고: 전류 감소 실패: {e}")
+            
             try:
                 hand.set_joint_position([0.0] * NUM_JOINTS, True)
-                time.sleep(1.0)
+                time.sleep(2.0)
             except Exception as e:
-                print(f"Warning: failed to open hand during shutdown: {e}")
-
-            # 손 정지
+                print(f"경고: 손 열기 실패: {e}")
+            
             try:
                 hand.stop()
             except Exception as e:
-                print(f"Warning: failed to stop hand: {e}")
-
+                print(f"경고: 손 정지 실패: {e}")
+    
     finally:
         try:
             SharpaWaveManager.get_instance().disconnect_all()
         except Exception as e:
-            print(f"Warning: failed to disconnect all: {e}")
-
-    print("Safe shutdown complete")
+            print(f"경고: 연결 해제 실패: {e}")
+    
+    print("안전 종료 완료")
 
 
 # =============================================================================
-# Initialization
+# Initialization & Utilities
 # =============================================================================
 
 def initialize(hand) -> bool:
-    """손 제어 파라미터를 초기화합니다."""
-    print("Initializing hand...")
-
-    initialization_steps = [
-        (hand.set_control_mode, ControlMode.POSITION, "control mode"),
-        (hand.set_speed_coeff, Config.INITIAL_SPEED_COEFF, "speed coefficient"),
-        (hand.set_current_coeff, Config.SAFE_INITIAL_CURRENT_COEFF, "current coefficient"),
-        (hand.set_control_source, ControlSource.SDK, "control source"),
+    """손 제어를 초기화합니다."""
+    print("손 초기화 중...")
+    
+    init_steps = [
+        (hand.set_control_mode, ControlMode.POSITION, "제어 모드"),
+        (hand.set_speed_coeff, Config.INITIAL_SPEED_COEFF, "속도 계수"),
+        (hand.set_current_coeff, Config.SAFE_INITIAL_CURRENT_COEFF, "전류 계수"),
+        (hand.set_control_source, ControlSource.SDK, "제어 소스"),
     ]
-
-    for func, param, description in initialization_steps:
+    
+    for func, param, desc in init_steps:
         error = func(param)
         if error.code != 0:
-            print(f"Failed to set {description}: {error.message}")
+            print(f"{desc} 설정 실패: {error.message}")
             return False
-
-    print("Hand initialization complete")
+    
+    print("손 초기화 완료")
     return True
 
 
-# =============================================================================
-# Utilities
-# =============================================================================
-
 def check_error(error, message: str) -> bool:
-    """SDK 에러 객체를 확인하고 실패 시 메시지를 출력합니다."""
+    """에러를 체크하고 메시지를 출력합니다."""
     if error.code != 0:
         print(f"{message}: {error.message}")
         return False
     return True
 
 
-def print_joint_positions_degree(hand) -> None:
-    """현재 관절 위치를 도 단위로 출력합니다."""
-    error, angles = hand.get_joint_position_degree()
+# =============================================================================
+# SDK API Wrapper Functions (실제 문서 확인 후 수정 필요)
+# =============================================================================
 
-    if error.code != 0:
-        print(f"Failed to get joint position(degree): {error.message}")
-        return
+def get_joint_angles_deg(hand) -> Optional[List[float]]:
+    """현재 관절 각도를 도 단위로 반환합니다."""
+    try:
+        error, angles = hand.get_joint_position_degree()
+        if error.code == 0:
+            return list(angles)
+    except Exception as e:
+        print(f"관절 각도 읽기 실패: {e}")
+    return None
 
-    print("Current joint angles (deg):")
-    for i, angle in enumerate(angles):
-        name = JOINT_NAMES[i] if i < len(JOINT_NAMES) else f"Joint {i}"
-        print(f"  {i:02d} | {name}: {angle:.2f}")
+
+def get_joint_torques(hand) -> Optional[List[float]]:
+    """
+    현재 관절 토크를 반환합니다.
+    
+    실제 SDK 문서에서 다음 중 하나의 함수명을 확인하여 수정하세요:
+    - hand.get_joint_torque()
+    - hand.get_torque()  
+    - hand.get_motor_torque()
+    """
+    try:
+        # TODO: 실제 SDK 함수명으로 수정 필요
+        if hasattr(hand, 'get_joint_torque'):
+            error, torques = hand.get_joint_torque()
+            if error.code == 0:
+                return list(torques)
+        elif hasattr(hand, 'get_torque'):
+            error, torques = hand.get_torque()
+            if error.code == 0:
+                return list(torques)
+    except Exception:
+        pass
+    return None
+
+
+def get_joint_currents(hand) -> Optional[List[float]]:
+    """
+    현재 관절 전류를 반환합니다.
+    
+    실제 SDK 문서에서 다음 중 하나의 함수명을 확인하여 수정하세요:
+    - hand.get_joint_current()
+    - hand.get_motor_current()
+    - hand.get_current()
+    """
+    try:
+        # TODO: 실제 SDK 함수명으로 수정 필요
+        if hasattr(hand, 'get_joint_current'):
+            error, currents = hand.get_joint_current()
+            if error.code == 0:
+                return list(currents)
+        elif hasattr(hand, 'get_motor_current'):
+            error, currents = hand.get_motor_current()
+            if error.code == 0:
+                return list(currents)
+    except Exception:
+        pass
+    return None
+
+
+def detect_stall(prev_angles: List[float], curr_angles: List[float]) -> bool:
+    """관절 움직임을 분석하여 stall을 감지합니다."""
+    active_joints = [i for i in range(NUM_JOINTS) 
+                    if i not in Config.SKIP_MOVE_JOINT_INDICES 
+                    and i not in Config.FIXED_JOINT_DEG]
+    
+    max_movement = max(
+        abs(curr_angles[i] - prev_angles[i]) 
+        for i in active_joints 
+        if i < len(curr_angles) and i < len(prev_angles)
+    )
+    
+    return max_movement < Config.STALL_THRESHOLD_DEG
 
 
 # =============================================================================
-# Pose Generation
+# Pose Generation & Motion Commands
 # =============================================================================
 
 def make_open_pose() -> List[float]:
-    """열린 손 자세를 생성합니다. 고정 관절은 Config.FIXED_JOINT_DEG 값을 유지합니다."""
+    """열린 손 자세를 생성합니다."""
     pose = [0.0] * NUM_JOINTS
-
-    for joint_index, fixed_deg in Config.FIXED_JOINT_DEG.items():
-        pose[joint_index] = math.radians(fixed_deg)
-
+    for idx, deg in Config.FIXED_JOINT_DEG.items():
+        pose[idx] = math.radians(deg)
     return pose
 
 
 def make_grasp_pose(close_ratio: float) -> List[float]:
-    """파지 자세를 생성합니다.
-    
-    Args:
-        close_ratio: 0.0 = 완전 열림 (하한각), 1.0 = 완전 닫힘 (상한각)
-    
-    Returns:
-        라디안 단위의 관절 각도 리스트 (길이: NUM_JOINTS)
-    """
+    """파지 자세를 생성합니다."""
     close_ratio = max(0.0, min(1.0, close_ratio))
     pose = [0.0] * NUM_JOINTS
-
+    
     for i in range(NUM_JOINTS):
         if i in Config.FIXED_JOINT_DEG:
-            # 고정 관절은 항상 지정된 각도 유지
             pose[i] = math.radians(Config.FIXED_JOINT_DEG[i])
         elif i in Config.SKIP_MOVE_JOINT_INDICES:
-            # 움직이지 않을 관절은 0도 유지
             pose[i] = 0.0
         else:
-            # 나머지 관절은 close_ratio에 따라 각도 계산
-            lo_deg, hi_deg = ANGLE_RANGES[i]
-            target_deg = lo_deg + (hi_deg - lo_deg) * close_ratio
+            lo, hi = ANGLE_RANGES[i]
+            target_deg = lo + (hi - lo) * close_ratio
             pose[i] = math.radians(target_deg)
-
+    
     return pose
 
 
-# =============================================================================
-# Hand Motion Commands
-# =============================================================================
-
 def set_hand_open(hand, interpolation: bool = True) -> bool:
-    """손을 열린 자세로 움직입니다."""
-    print("Opening hand...")
+    """손을 엽니다."""
+    print("손을 열고 있습니다...")
     error = hand.set_joint_position(make_open_pose(), interpolation)
-    return check_error(error, "Failed to open hand")
+    return check_error(error, "손 열기 실패")
 
 
 def set_grasp_pose(hand, close_ratio: float, interpolation: bool = True) -> bool:
-    """손을 지정된 파지 자세로 움직입니다."""
-    print(f"Moving to grasp pose. close_ratio={close_ratio:.2f}")
+    """파지 자세로 이동합니다."""
+    print(f"파지 자세로 이동 중... (닫힘 비율: {close_ratio:.2f})")
     error = hand.set_joint_position(make_grasp_pose(close_ratio), interpolation)
-    return check_error(error, "Failed to set grasp pose")
+    return check_error(error, "파지 자세 설정 실패")
 
 
-def ramp_current_gradually(hand) -> bool:
-    """전류 계수를 점진적으로 증가시켜 안전하게 강한 힘을 발생시킵니다."""
+# =============================================================================
+# Maximum Grip Force Measurement Core Functions
+# =============================================================================
+
+def ramp_current_and_measure(hand) -> MaxGripResult:
+    """전류를 점진적으로 증가시키면서 악력을 측정합니다."""
+    result = MaxGripResult()
+    
     start_coeff = Config.RAMP_START_COEFF
     end_coeff = min(Config.FINAL_CURRENT_COEFF, Config.MAX_ALLOWED_CURRENT_COEFF)
-    step = Config.RAMP_STEP
-
-    print(f"Ramping current coefficient: {start_coeff:.2f} → {end_coeff:.2f} (step: {step:.2f})")
-
     current_coeff = start_coeff
-    while current_coeff <= end_coeff + 1e-9:
-        print(f"  Setting current coefficient: {current_coeff:.2f}")
-        error = hand.set_current_coeff(current_coeff)
-        if not check_error(error, f"Failed to set current coeff {current_coeff:.2f}"):
-            return False
-
-        time.sleep(Config.RAMP_STEP_HOLD_S)
-        current_coeff += step
-
-    return True
-
-
-# =============================================================================
-# Main Grasp Sequence
-# =============================================================================
-
-def execute_strong_grasp_sequence(hand) -> bool:
-    """강한 파지 시퀀스를 실행합니다.
     
-    시퀀스:
-        1. 낮은 전류로 시작
-        2. 손 열기
-        3. 예비 파지 자세로 이동
-        4. 본 파지 자세로 이동
-        5. 전류 점진적 증가
-        6. 파지 상태 유지
-        7. 전류 감소
-        8. 손 열기
-    """
+    prev_angles: Optional[List[float]] = None
+    stall_count = 0
+    
+    print(f"\n전류 점진 증가 시작: {start_coeff:.2f} → {end_coeff:.2f}")
+    print("각 단계마다 센서 데이터를 수집합니다...")
+    
+    while current_coeff <= end_coeff + 1e-9:
+        print(f"\n[측정] 전류 계수: {current_coeff:.2f}")
+        
+        # 전류 설정
+        error = hand.set_current_coeff(current_coeff)
+        if not check_error(error, f"전류 계수 {current_coeff:.2f} 설정 실패"):
+            break
+        
+        # 안정화 대기
+        time.sleep(Config.RAMP_STEP_HOLD_S)
+        
+        # 데이터 수집
+        measurement = GripMeasurementData(current_coeff, time.time())
+        measurement.joint_angles_deg = get_joint_angles_deg(hand)
+        measurement.joint_torques = get_joint_torques(hand)
+        measurement.joint_currents = get_joint_currents(hand)
+        
+        if measurement.joint_angles_deg is None:
+            print("경고: 관절 각도 읽기 실패, 다음 스텝으로 진행")
+            current_coeff += Config.RAMP_STEP
+            continue
+        
+        # 악력 추정 계산
+        grip_estimate = measurement.calculate_grip_estimate()
+        print(f"추정 악력 지표: {grip_estimate:.2f}")
+        
+        result.add_measurement(measurement)
+        
+        # Stall 감지
+        if prev_angles is not None:
+            if detect_stall(prev_angles, measurement.joint_angles_deg):
+                stall_count += 1
+                print(f"Stall 감지됨 ({stall_count}/{Config.STALL_CONFIRM_COUNT})")
+                
+                if stall_count >= Config.STALL_CONFIRM_COUNT:
+                    print("*** 최대 악력에 도달했습니다 (Stall 감지) ***")
+                    result.stall_detected = True
+                    result.stall_current_coeff = current_coeff
+                    break
+            else:
+                stall_count = 0
+        
+        prev_angles = measurement.joint_angles_deg
+        current_coeff += Config.RAMP_STEP
+    
+    result.finalize_result()
+    return result
+
+
+def save_measurement_to_csv(result: MaxGripResult) -> None:
+    """측정 결과를 CSV 파일로 저장합니다."""
+    if not result.measurement_data:
+        return
+    
+    timestamp_str = datetime.now().strftime("%Y%m%d_%H%M%S")
+    filename = f"{Config.CSV_DIR}/max_grip_measurement_{timestamp_str}.csv"
+    
+    try:
+        with open(filename, 'w', newline='', encoding='utf-8') as f:
+            writer = csv.writer(f)
+            
+            # 헤더 작성
+            headers = ['timestamp', 'current_coeff', 'estimated_grip_force']
+            headers += [f'angle_deg_{i}' for i in range(NUM_JOINTS)]
+            
+            if result.measurement_data[0].joint_torques:
+                headers += [f'torque_{i}' for i in range(NUM_JOINTS)]
+            if result.measurement_data[0].joint_currents:
+                headers += [f'current_A_{i}' for i in range(NUM_JOINTS)]
+            
+            writer.writerow(headers)
+            
+            # 데이터 작성
+            for data in result.measurement_data:
+                row = [
+                    data.timestamp,
+                    data.current_coeff, 
+                    data.estimated_grip_force
+                ]
+                row += data.joint_angles_deg
+                
+                if data.joint_torques:
+                    row += data.joint_torques
+                if data.joint_currents:
+                    row += data.joint_currents
+                
+                writer.writerow(row)
+        
+        print(f"\n측정 결과가 저장되었습니다: {filename}")
+    
+    except Exception as e:
+        print(f"CSV 저장 실패: {e}")
+
+
+# =============================================================================
+# Main Maximum Grip Measurement Sequence
+# =============================================================================
+
+def execute_maximum_grip_test(hand) -> Optional[MaxGripResult]:
+    """최대 악력 측정 전체 시퀀스를 실행합니다."""
     interpolation = True
-
-    print("========== Strong Grasp Sequence Start ==========")
-
-    # 1. 낮은 전류로 시작
-    print("[1] Set initial low current")
+    
+    print("\n" + "="*80)
+    print("                     최대 악력 측정 시작")
+    print("="*80)
+    print("⚠️  경고: 로봇이 최대 힘을 발휘합니다. 안전에 주의하세요!")
+    print("="*80)
+    
+    # 1. 초기 안전 전류 설정
+    print("\n[1] 안전 전류로 초기화")
     error = hand.set_current_coeff(Config.SAFE_INITIAL_CURRENT_COEFF)
-    if not check_error(error, "Failed to set initial current coeff"):
-        return False
+    if not check_error(error, "초기 전류 설정 실패"):
+        return None
     time.sleep(Config.DELAY_AFTER_INIT)
-
-    # 2. 손 열기
-    print("[2] Open hand")
+    
+    # 2. 손 열기 (악력계 배치 시간)
+    print("\n[2] 손을 열고 악력계를 배치하세요")
     if not set_hand_open(hand, interpolation):
-        return False
-    time.sleep(Config.DELAY_AFTER_OPEN)
-
+        return None
+    
+    print("🔧 악력계나 로드셀을 손바닥에 배치할 시간을 드립니다...")
+    for i in range(5, 0, -1):
+        print(f"   {i}초 후 측정을 시작합니다...")
+        time.sleep(1.0)
+    
     # 3. 예비 파지 자세
-    print("[3] Move to pre-grasp pose")
+    print("\n[3] 예비 파지 자세 (악력계 접촉)")
     if not set_grasp_pose(hand, Config.PRE_GRASP_RATIO, interpolation):
-        return False
+        return None
     time.sleep(Config.DELAY_AFTER_PRE_GRASP)
-
-    # 4. 본 파지 자세
-    print("[4] Move to grasp pose")
+    
+    # 4. 최대 파지 자세
+    print("\n[4] 최대 파지 자세로 이동")
     if not set_grasp_pose(hand, Config.GRASP_RATIO, interpolation):
-        return False
+        return None
     time.sleep(Config.DELAY_AFTER_GRASP)
-
-    # 5. 전류 점진적 증가
-    print("[5] Increase grip current gradually")
-    if not ramp_current_gradually(hand):
-        return False
-
-    # 6. 파지 상태 유지
-    print(f"[6] Holding object for {Config.HOLD_TIME_S:.1f} seconds")
+    
+    # 5. 전류 증가 + 악력 측정
+    print("\n[5] 전류를 점진적으로 증가시키며 최대 악력을 측정합니다")
+    result = ramp_current_and_measure(hand)
+    
+    # 6. 최대 악력 유지
+    print(f"\n[6] *** 최대 악력 유지 중! 악력계 수치를 확인하세요! ({Config.HOLD_TIME_S}초) ***")
     time.sleep(Config.HOLD_TIME_S)
-    print_joint_positions_degree(hand)
-
-    # 7. 전류 감소
-    print("[7] Reduce current before release")
+    
+    # 외부 측정 안내 메시지 추가
+    result.external_measurement_note = (
+        f"이 시점에서 악력계에 표시된 최대값이 실제 최대 악력입니다.\n"
+        f"소프트웨어 추정값: {result.max_grip_data.estimated_grip_force:.2f} (참고용)"
+    )
+    
+    # 7. 안전한 해제
+    print("\n[7] 측정 완료. 안전하게 힘을 빼고 있습니다...")
     error = hand.set_current_coeff(Config.SAFE_RELEASE_CURRENT_COEFF)
-    check_error(error, "Failed to reduce current coeff")
-    time.sleep(Config.DELAY_AFTER_CURRENT_REDUCE)
-
+    check_error(error, "전류 감소 실패")
+    time.sleep(Config.DELAY_AFTER_RELEASE)
+    
     # 8. 손 열기
-    print("[8] Open hand")
+    print("\n[8] 손을 열어 악력계를 해제합니다")
     set_hand_open(hand, interpolation)
     time.sleep(Config.DELAY_AFTER_OPEN)
-
-    print("========== Strong Grasp Sequence Finished ==========")
-    return True
+    
+    print("\n" + "="*80)
+    print("                   최대 악력 측정 완료")
+    print("="*80)
+    
+    return result
 
 
 # =============================================================================
@@ -409,46 +596,50 @@ def execute_strong_grasp_sequence(hand) -> bool:
 # =============================================================================
 
 if __name__ == "__main__":
-    print("Sharpa Wave Strong Grasp Example - Starting")
+    print("Sharpa Wave 최대 악력 측정 프로그램 시작")
     hand = None
-
+    
     try:
-        print("Sharpa Wave Example - Auto Detect Hand")
+        # 디바이스 연결
         hand = auto_detect_hand()
-
         if hand is None:
-            print("Error: No available device found")
+            print("오류: 사용 가능한 디바이스를 찾을 수 없습니다")
             sys.exit(1)
-
-        print("Sharpa Wave Example - Init Hand Running Mode")
+        
+        # 초기화
         if not initialize(hand):
-            print("Error: Failed to initialize hand")
+            print("오류: 손 초기화 실패")
             sys.exit(1)
-
-        print("Sharpa Wave Example - Start Hand Running Mode")
+        
+        # 손 시작
         hand.start()
-
-        # 시작 전 초기 위치로 이동
+        
+        # 초기 위치로 이동
         set_hand_open(hand, interpolation=True)
         time.sleep(1.0)
-
-        print("Sharpa Wave Example - Run Strong Grasp")
         
-        # 강한 파지 시퀀스 실행 (모든 파라미터는 Config 클래스에서 관리)
-        success = execute_strong_grasp_sequence(hand)
-
-        if not success:
-            print("Strong grasp sequence failed")
+        # 최대 악력 측정 실행
+        result = execute_maximum_grip_test(hand)
+        
+        if result is None:
+            print("측정 시퀀스 실패")
             sys.exit(1)
-
-        print("Sharpa Wave Example - Completed Successfully")
-
+        
+        # 결과 출력
+        result.print_summary()
+        
+        # CSV 저장
+        if Config.SAVE_CSV:
+            save_measurement_to_csv(result)
+        
+        print("\n🎉 Sharpa Wave 최대 악력 측정이 성공적으로 완료되었습니다!")
+    
     except KeyboardInterrupt:
-        print("\nKeyboardInterrupt received. Stopping safely...")
-
+        print("\n\n⚠️  사용자가 중단했습니다. 안전하게 종료 중...")
+    
     except Exception as e:
-        print(f"Unexpected error: {e}")
-
+        print(f"\n❌ 예상치 못한 오류: {e}")
+    
     finally:
         safe_shutdown(hand)
-        print("Sharpa Wave Example - Stopped")
+        print("프로그램 종료")
